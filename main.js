@@ -126,6 +126,10 @@ function createWindow() {
     },
   });
   win.loadFile('index.html');
+  // The window only ever shows index.html: block navigation (e.g. a file dropped outside the drop zone)
+  // and new windows, so the UI can never be replaced by other content.
+  win.webContents.on('will-navigate', (e) => e.preventDefault());
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.on('closed', () => { win = null; });
   if (process.argv.includes('--selftest')) win.webContents.once('did-finish-load', runSelfTest);
 }
