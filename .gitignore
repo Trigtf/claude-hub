@@ -3,3 +3,4 @@ selftest-*.json
 selftest-*.png
 *.log
 .DS_Store
+dist/

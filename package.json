@@ -4,14 +4,55 @@
   "description": "Project explorer with embedded Claude Code terminals",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "dist": "electron-builder --win portable --publish never"
   },
   "license": "ISC",
   "dependencies": {
     "@lydell/node-pty": "^1.2.0-beta.18",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-webgl": "^0.19.0",
-    "@xterm/xterm": "^6.0.0",
-    "electron": "^45.4.1"
+    "@xterm/xterm": "^6.0.0"
+  },
+  "devDependencies": {
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0"
+  },
+  "author": "Trigtf",
+  "homepage": "https://github.com/Trigtf/claude-hub",
+  "build": {
+    "appId": "io.github.trigtf.claudehub",
+    "productName": "Claude Hub",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "i18n.js",
+      "index.html",
+      "styles.css",
+      "package.json",
+      "node_modules/@xterm/**/*",
+      "node_modules/@lydell/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/@lydell/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "Claude-Hub-${version}-portable.exe"
+    }
   }
 }
