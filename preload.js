@@ -19,7 +19,7 @@ contextBridge.exposeInMainWorld('hub', {
   openFile: (p) => ipcRenderer.invoke('file:open', p),
   revealFile: (p) => ipcRenderer.send('file:reveal', p),
   startDrag: (p) => ipcRenderer.send('file:drag', p),
-  projectMenu: (projectPath, pinned) => ipcRenderer.send('project:menu', { path: projectPath, pinned }),
+  projectMenu: (projectPath, pinned, lang) => ipcRenderer.send('project:menu', { path: projectPath, pinned, lang }),
   onProjectAction: (cb) => ipcRenderer.on('project:action', (_e, msg) => cb(msg)),
   pinProject: (projectPath, name, pinned) => ipcRenderer.invoke('projects:pin', projectPath, name, pinned),
   setOrder: (paths) => ipcRenderer.invoke('projects:order', paths),

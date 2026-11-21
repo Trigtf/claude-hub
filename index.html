@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="el">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data:; script-src 'self'">
@@ -13,42 +13,42 @@
       <div class="side-head">
         <span>Projects</span>
         <span class="head-btns">
-          <button id="auth" title="Εκτελεί: gcloud auth application-default login">Auth</button>
+          <button id="auth" title="Runs: gcloud auth application-default login">Auth</button>
           <button id="settings-btn" title="Settings">&#x2699;</button>
-          <button id="refresh" title="Ανανέωση λίστας">&#x21bb;</button>
+          <button id="refresh" title="Refresh list">&#x21bb;</button>
         </span>
       </div>
       <button id="new-project" class="primary">+ Create New Project</button>
-      <input id="search" type="text" placeholder="Αναζήτηση project..." autocomplete="off" spellcheck="false">
+      <input id="search" type="text" placeholder="Search projects..." autocomplete="off" spellcheck="false">
       <ul id="list"></ul>
     </aside>
     <div id="splitter" class="splitter"></div>
     <main id="main">
       <div id="tabs"></div>
       <div id="terms">
-        <div id="empty">Διάλεξε ένα project από αριστερά για να ανοίξει το Claude Code</div>
+        <div id="empty">Pick a project on the left to open Claude Code</div>
       </div>
     </main>
     <div id="splitter-r" class="splitter"></div>
     <aside id="rightbar">
       <section id="drop" tabindex="0">
         <div class="drop-head">
-          <span class="ttl"><span>Αρχεία για το project</span><span id="drop-proj" class="proj-tag"></span></span>
-          <label class="auto" title="Στέλνει αυτόματα τη διαδρομή στο ενεργό terminal"><input type="checkbox" id="auto" checked> αυτόματα</label>
+          <span class="ttl"><span>Files for the project</span><span id="drop-proj" class="proj-tag"></span></span>
+          <label class="auto" title="Automatically sends the path to the active terminal"><input type="checkbox" id="auto" checked> automatic</label>
         </div>
-        <div id="drop-hint">Σύρε εδώ αρχεία/φακέλους ή πάτα Ctrl+V</div>
+        <div id="drop-hint">Drop files/folders here or press Ctrl+V</div>
         <div class="drop-actions">
-          <button id="paste-btn">Επικόλληση clipboard</button>
-          <button id="inbox-btn" title="Άνοιγμα φακέλου με τα επικολλημένα">Φάκελος</button>
+          <button id="paste-btn">Paste clipboard</button>
+          <button id="inbox-btn" title="Open the folder with pasted items">Folder</button>
         </div>
         <ul id="chips"></ul>
       </section>
       <section id="outputs">
         <div class="drop-head">
-          <span class="ttl"><span>Αρχεία από το Claude <span id="out-count"></span></span><span id="out-proj" class="proj-tag"></span></span>
+          <span class="ttl"><span>Files from Claude <span id="out-count"></span></span><span id="out-proj" class="proj-tag"></span></span>
           <span class="out-tools">
-            <label class="auto" title="Κρύβει αρχεία κώδικα και ρυθμίσεων (js, py, css, json...)"><input type="checkbox" id="only-deliv" checked> μόνο παραδοτέα</label>
-            <button id="out-clear" title="Καθαρισμός λίστας">&times;</button>
+            <label class="auto" title="Hides code and config files (js, py, css, json...)"><input type="checkbox" id="only-deliv" checked> deliverables only</label>
+            <button id="out-clear" title="Clear list">&times;</button>
           </span>
         </div>
         <ul id="outputs-list"></ul>
@@ -57,28 +57,28 @@
   </div>
   <div id="modal" hidden>
     <form id="dlg-new" class="dialog" hidden>
-      <h3>Νέο project</h3>
-      <label for="new-name">Όνομα</label>
-      <input id="new-name" type="text" autocomplete="off" spellcheck="false" placeholder="π.χ. my-new-app">
-      <div class="where">Θα δημιουργηθεί στο: <code id="new-where"></code> <button type="button" id="new-change" class="link">αλλαγή</button></div>
+      <h3>New project</h3>
+      <label for="new-name">Name</label>
+      <input id="new-name" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. my-new-app">
+      <div class="where">Will be created in: <code id="new-where"></code> <button type="button" id="new-change" class="link">change</button></div>
       <div class="error" id="new-error"></div>
-      <div class="buttons"><button type="button" class="cancel">Άκυρο</button><button type="submit" class="primary">Δημιουργία</button></div>
+      <div class="buttons"><button type="button" class="cancel">Cancel</button><button type="submit" class="primary">Create</button></div>
     </form>
     <form id="dlg-settings" class="dialog wide" hidden>
       <h3>Settings</h3>
       <div class="stabs">
-        <button type="button" class="stab active" data-tab="general">Γενικά</button>
+        <button type="button" class="stab active" data-tab="general">General</button>
         <button type="button" class="stab" data-tab="claude">Claude</button>
         <button type="button" class="stab" data-tab="env">Environment</button>
         <button type="button" class="stab" data-tab="mcp">MCP</button>
       </div>
 
       <div class="spane" data-pane="general">
-        <label for="set-path">Φάκελος για τα νέα projects</label>
-        <div class="row"><input id="set-path" type="text" autocomplete="off" spellcheck="false"><button type="button" id="set-browse">Επιλογή...</button></div>
-        <div class="hint">Τα projects που φτιάχνεις από εδώ δημιουργούνται σε αυτόν το φάκελο και εμφανίζονται και στο /project.</div>
-        <label for="set-font">Γραμματοσειρά terminal (όνομα εγκατεστημένου font)</label>
-        <input id="set-font" type="text" list="font-list" autocomplete="off" spellcheck="false" placeholder="π.χ. Cascadia Mono">
+        <label for="set-path">Folder for new projects</label>
+        <div class="row"><input id="set-path" type="text" autocomplete="off" spellcheck="false"><button type="button" id="set-browse">Browse...</button></div>
+        <div class="hint">Projects you create here are made in this folder and also show up in /project.</div>
+        <label for="set-font">Terminal font (name of an installed font)</label>
+        <input id="set-font" type="text" list="font-list" autocomplete="off" spellcheck="false" placeholder="e.g. Cascadia Mono">
         <datalist id="font-list">
           <option value="Cascadia Mono"></option>
           <option value="Cascadia Code"></option>
@@ -90,25 +90,32 @@
           <option value="Source Code Pro"></option>
           <option value="Segoe UI Mono"></option>
         </datalist>
-        <label for="set-size">Μέγεθος γραμμάτων (8-32)</label>
-        <div class="row"><input id="set-size" type="number" min="8" max="32" step="1"><button type="button" id="font-reset">Προεπιλογή</button></div>
-        <div id="font-sample">Δείγμα: Καλημέρα κόσμε, The quick brown fox 0123456789 {}[]()</div>
-        <label for="set-theme">Θέμα εμφάνισης</label>
+        <label for="set-size">Font size (8-32)</label>
+        <div class="row"><input id="set-size" type="number" min="8" max="32" step="1"><button type="button" id="font-reset">Default</button></div>
+        <div id="font-sample">Sample: Hello world, The quick brown fox 0123456789 {}[]()</div>
+        <label for="set-theme">Theme</label>
         <select id="set-theme">
-          <option value="dark">Σκοτεινό</option>
-          <option value="light">Φωτεινό</option>
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
         </select>
-        <div class="hint">Αλλάζει το hub και το terminal. Το Claude Code έχει δικό του θέμα χρωμάτων (/theme μέσα στο Claude) που ίσως θες να το ταιριάξεις.</div>
-        <label class="check"><input type="checkbox" id="set-webgl"> Γρήγορη σχεδίαση terminal (WebGL)</label>
-        <div class="hint">Χρησιμοποιεί την κάρτα γραφικών για το κείμενο του terminal. Αν δεις γραφικά προβλήματα, απενεργοποίησέ το.</div>
-        <label class="check"><input type="checkbox" id="set-resume"> Άνοιγμα με την τελευταία συνομιλία του project</label>
-        <div class="hint">Όταν ανοίγεις project που έχει προηγούμενη συνομιλία, συνεχίζεται αυτόματα (--continue). Αν το απενεργοποιήσεις, ξεκινά πάντα νέα συνομιλία.</div>
+        <div class="hint">Changes the hub and the terminal. Claude Code has its own color theme (/theme inside Claude) that you may want to match.</div>
+        <label for="set-lang">Language</label>
+        <select id="set-lang">
+          <option value="auto">Automatic</option>
+          <option value="en">English</option>
+          <option value="el">&#917;&#955;&#955;&#951;&#957;&#953;&#954;&#940;</option>
+        </select>
+        <div class="hint">Restart the app to apply</div>
+        <label class="check"><input type="checkbox" id="set-webgl"> Fast terminal rendering (WebGL)</label>
+        <div class="hint">Uses the graphics card to draw terminal text. If you see visual glitches, turn it off.</div>
+        <label class="check"><input type="checkbox" id="set-resume"> Open with the project's last conversation</label>
+        <div class="hint">When you open a project that has a previous conversation, it continues automatically (--continue). If you turn this off, a new conversation always starts.</div>
       </div>
 
       <div class="spane" data-pane="claude" hidden>
-        <div class="hint">Αλλάζουν το <code id="cl-path"></code>. Ισχύουν για νέες συνεδρίες Claude (τα ήδη ανοιχτά tabs δεν επηρεάζονται).</div>
+        <div class="hint"><span>Edits</span> <code id="cl-path"></code><span>.</span> <span>Applies to new Claude sessions (tabs that are already open are not affected).</span></div>
         <label for="cl-model">Model</label>
-        <input id="cl-model" type="text" list="model-list" autocomplete="off" spellcheck="false" placeholder="κενό = προεπιλογή του Claude Code">
+        <input id="cl-model" type="text" list="model-list" autocomplete="off" spellcheck="false" placeholder="empty = Claude Code default">
         <datalist id="model-list">
           <option value="opus"></option>
           <option value="sonnet"></option>
@@ -118,56 +125,57 @@
         <div class="hint" id="cl-model-note"></div>
         <label for="cl-mode">Permission mode</label>
         <select id="cl-mode"></select>
-        <div class="warn" id="cl-mode-warn" hidden>Το bypassPermissions εκτελεί εργαλεία (εντολές, εγγραφές αρχείων) χωρίς καμία ερώτηση. Χρησιμοποίησέ το μόνο σε projects που εμπιστεύεσαι.</div>
-        <label class="check"><input type="checkbox" id="cl-bypassok"> Να επιτρέπεται το bypass mode (αλλιώς μπαίνει permissions.disableBypassPermissionsMode)</label>
-        <label class="check"><input type="checkbox" id="cl-skipprompt"> Να μη ζητάει επιβεβαίωση όταν ενεργοποιείται το bypass (skipDangerousModePermissionPrompt)</label>
+        <div class="warn" id="cl-mode-warn" hidden>bypassPermissions runs tools (commands, file writes) without asking. Use it only in projects you trust.</div>
+        <label class="check"><input type="checkbox" id="cl-bypassok"> Allow bypass mode (otherwise permissions.disableBypassPermissionsMode is set)</label>
+        <label class="check"><input type="checkbox" id="cl-skipprompt"> Don't ask for confirmation when bypass is enabled (skipDangerousModePermissionPrompt)</label>
         <div class="cols3">
-          <div><label for="cl-allow">Allow (ένας κανόνας ανά γραμμή)</label><textarea id="cl-allow" rows="6" spellcheck="false"></textarea></div>
+          <div><label for="cl-allow">Allow (one rule per line)</label><textarea id="cl-allow" rows="6" spellcheck="false"></textarea></div>
           <div><label for="cl-deny">Deny</label><textarea id="cl-deny" rows="6" spellcheck="false"></textarea></div>
           <div><label for="cl-ask">Ask</label><textarea id="cl-ask" rows="6" spellcheck="false"></textarea></div>
         </div>
-        <label class="check"><input type="checkbox" id="cl-autoupdate"> Αυτόματες ενημερώσεις του Claude Code</label>
-        <div class="row"><label for="cl-channel" class="inline">Κανάλι</label><select id="cl-channel"><option value="latest">latest</option><option value="stable">stable</option></select></div>
+        <label class="check"><input type="checkbox" id="cl-autoupdate"> Automatic Claude Code updates</label>
+        <div class="row"><label for="cl-channel" class="inline">Channel</label><select id="cl-channel"><option value="latest">latest</option><option value="stable">stable</option></select></div>
       </div>
 
       <div class="spane" data-pane="env" hidden>
-        <div class="hint">Το model (ANTHROPIC_MODEL) και το DISABLE_AUTOUPDATER ρυθμίζονται από την καρτέλα Claude.</div>
+        <div class="hint">The model (ANTHROPIC_MODEL) and DISABLE_AUTOUPDATER are set from the Claude tab.</div>
         <label>Claude env (settings.json → env)</label>
         <div id="env-claude" class="envtable"></div>
-        <button type="button" class="addrow" data-target="env-claude">+ Προσθήκη μεταβλητής</button>
-        <label>gcloud env (για το κουμπί Auth, π.χ. CLOUDSDK_CORE_PROJECT, GOOGLE_CLOUD_PROJECT)</label>
+        <button type="button" class="addrow" data-target="env-claude">+ Add variable</button>
+        <label>gcloud env (for the Auth button, e.g. CLOUDSDK_CORE_PROJECT, GOOGLE_CLOUD_PROJECT)</label>
         <div id="env-gcloud" class="envtable"></div>
-        <button type="button" class="addrow" data-target="env-gcloud">+ Προσθήκη μεταβλητής</button>
+        <button type="button" class="addrow" data-target="env-gcloud">+ Add variable</button>
       </div>
 
       <div class="spane" data-pane="mcp" hidden>
-        <div class="hint">Εμφανίζονται οι MCP servers των user, local και του ενεργού project. Οι προσθήκες/διαγραφές γίνονται αμέσως (μέσω <code>claude mcp</code>).</div>
+        <div class="hint">Shows MCP servers for user, local and the active project. Additions and removals apply immediately (via <code>claude mcp</code><span>).</span></div>
         <div id="mcp-list" class="mcplist"></div>
         <div class="row">
-          <button type="button" id="mcp-check">Έλεγχος σύνδεσης</button>
-          <button type="button" id="mcp-add-toggle">+ Προσθήκη server</button>
+          <button type="button" id="mcp-check">Check connection</button>
+          <button type="button" id="mcp-add-toggle">+ Add server</button>
         </div>
         <pre id="mcp-check-out" hidden></pre>
         <div id="mcp-add" class="mcpadd" hidden>
           <div class="row">
-            <input id="mcp-name" type="text" placeholder="όνομα" autocomplete="off" spellcheck="false">
-            <select id="mcp-transport"><option value="stdio">stdio (εντολή)</option><option value="http">http</option><option value="sse">sse</option></select>
-            <select id="mcp-scope"><option value="user">user (όλα τα projects)</option><option value="local">local (ενεργό project)</option><option value="project">project (.mcp.json)</option></select>
+            <input id="mcp-name" type="text" placeholder="name" autocomplete="off" spellcheck="false">
+            <select id="mcp-transport"><option value="stdio">stdio (command)</option><option value="http">http</option><option value="sse">sse</option></select>
+            <select id="mcp-scope"><option value="user">user (all projects)</option><option value="local">local (active project)</option><option value="project">project (.mcp.json)</option></select>
           </div>
-          <input id="mcp-target" type="text" placeholder="π.χ. npx -y @modelcontextprotocol/server-filesystem C:/folder  ή  https://example.com/mcp" autocomplete="off" spellcheck="false">
-          <input id="mcp-env" type="text" placeholder="env για stdio, χωρισμένα με κενό: KEY=value KEY2=value2 (προαιρετικό)" autocomplete="off" spellcheck="false">
-          <div class="buttons"><button type="button" id="mcp-add-cancel">Άκυρο</button><button type="button" id="mcp-add-go" class="primary">Προσθήκη</button></div>
+          <input id="mcp-target" type="text" placeholder="e.g. npx -y @modelcontextprotocol/server-filesystem C:/folder  or  https://example.com/mcp" autocomplete="off" spellcheck="false">
+          <input id="mcp-env" type="text" placeholder="env for stdio, separated by spaces: KEY=value KEY2=value2 (optional)" autocomplete="off" spellcheck="false">
+          <div class="buttons"><button type="button" id="mcp-add-cancel">Cancel</button><button type="button" id="mcp-add-go" class="primary">Add</button></div>
         </div>
       </div>
 
       <div class="error" id="set-error"></div>
-      <div class="buttons"><button type="button" class="cancel">Άκυρο</button><button type="submit" class="primary">Αποθήκευση</button></div>
+      <div class="buttons"><button type="button" class="cancel">Cancel</button><button type="submit" class="primary">Save</button></div>
     </form>
   </div>
   <div id="lightbox" hidden><img alt=""></div>
   <script src="node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
   <script src="node_modules/@xterm/addon-webgl/lib/addon-webgl.js"></script>
+  <script src="i18n.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

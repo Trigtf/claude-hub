@@ -1,12 +1,11 @@
 const { app, BrowserWindow, ipcMain, clipboard, shell, Menu, dialog, nativeImage } = require('electron');
-const { execFile } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const pty = require('@lydell/node-pty');
 
 const HOME = os.homedir();
-const LAUNCHER = path.join(HOME, '.claude', 'project-launcher', 'projects.py');
 const INBOX = path.join(HOME, '.claude', 'hub-inbox');
 const CONFIG_FILE = process.env.HUB_CONFIG || path.join(HOME, '.claude', 'project-launcher', 'config.json');
 const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
@@ -20,7 +19,7 @@ function readConfigStrict() {
   try {
     return { ok: true, cfg: JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) };
   } catch (e) {
-    return { ok: false, error: `Το config.json δεν διαβάζεται αυτή τη στιγμή (${e.message}). Δοκίμασε ξανά.` };
+    return { ok: false, error: `config.json cannot be read right now (${e.message}). Try again.` };
   }
 }
 
@@ -380,18 +379,146 @@ async function runSelfTest() {
   app.quit();
 }
 
-ipcMain.handle('projects:list', () => new Promise((resolve) => {
-  if (!fs.existsSync(LAUNCHER)) {
-    resolve({ error: `Δεν βρέθηκε το ${LAUNCHER}. Τρέξε πρώτα το install.py του claude-project-launcher.` });
-    return;
-  }
-  execFile('python', [LAUNCHER, 'json'], { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024, env: { ...process.env, PYTHONIOENCODING: 'utf-8', ...(process.env.HUB_CONFIG ? { PROJECT_LAUNCHER_CONFIG: process.env.HUB_CONFIG } : {}) } }, (err, stdout) => {
-    if (err) { resolve({ error: `Αποτυχία python: ${err.message}` }); return; }
-    try { resolve({ projects: JSON.parse(stdout) }); } catch (e) { resolve({ error: `Μη έγκυρη έξοδος: ${e.message}` }); }
-  });
-}));
+// ---------- project discovery (built in: no Python / external launcher needed) ----------
+const SESSIONS_DIR = path.join(HOME, '.claude', 'projects');
+const DEFAULT_AUTO_ROOTS = ['Desktop', 'OneDrive/Desktop', 'Documents', 'OneDrive/Documents', 'source/repos', 'repos', 'dev', 'code', 'src', 'projects', 'Projects', 'github', 'GitHub'];
+const MARKER_FILES = new Set(['.git', 'package.json', 'pyproject.toml', 'requirements.txt', 'cargo.toml', 'go.mod', 'pom.xml', 'build.gradle', 'composer.json', 'claude.md']);
+const MARKER_SUFFIXES = ['.sln', '.csproj'];
+const SKIP_DIRS = new Set(['node_modules', 'venv', 'env', '__pycache__', 'dist', 'build', 'appdata', 'site-packages']);
+const SCAN_BUDGET = 4000;
 
-function spawnPty(id, kind, cwd, resume, cols, rows) {
+function normKey(p) {
+  let n = path.normalize(String(p));
+  if (n.length > 3) n = n.replace(/[\\/]+$/, '');
+  return n.toLowerCase();
+}
+
+function globToRegex(glob) {
+  const body = String(glob).toLowerCase().replace(/[.+^${}()|\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+  return new RegExp(`^${body}$`);
+}
+
+function readSessionCwd(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(65536);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    for (const line of buf.toString('utf8', 0, n).split('\n').slice(0, 51)) {
+      const m = line.match(/"cwd":"((?:[^"\\]|\\.)*)"/);
+      if (m) { try { return JSON.parse(`"${m[1]}"`); } catch { /* malformed escape: keep looking */ } }
+    }
+  } catch { /* unreadable transcript */ } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already closed */ } }
+  }
+  return null;
+}
+
+function sessionIndex() {
+  const idx = new Map();
+  let dirs = [];
+  try { dirs = fs.readdirSync(SESSIONS_DIR, { withFileTypes: true }).filter((d) => d.isDirectory()); } catch { return idx; }
+  for (const d of dirs) {
+    const dir = path.join(SESSIONS_DIR, d.name);
+    let files = [];
+    try {
+      files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'))
+        .map((f) => ({ f: path.join(dir, f), t: fs.statSync(path.join(dir, f)).mtimeMs / 1000 }))
+        .sort((a, b) => b.t - a.t);
+    } catch { continue; }
+    for (const { f } of files.slice(0, 3)) {
+      const cwd = readSessionCwd(f);
+      if (cwd) { idx.set(normKey(cwd), [cwd, files[0].t]); break; }
+    }
+  }
+  return idx;
+}
+
+function isProjectDir(dir) {
+  try {
+    return fs.readdirSync(dir).some((n) => { const l = n.toLowerCase(); return MARKER_FILES.has(l) || MARKER_SUFFIXES.some((s) => l.endsWith(s)); });
+  } catch { return false; }
+}
+
+function autoScan(cfg, excludeRes) {
+  const roots = Array.isArray(cfg.auto_scan) ? cfg.auto_scan : DEFAULT_AUTO_ROOTS.map((r) => path.join(HOME, r));
+  const depth = Number.isInteger(cfg.auto_scan_depth) ? cfg.auto_scan_depth : 2;
+  let budget = SCAN_BUDGET;
+  const found = [];
+  const walk = (dir, level) => {
+    let subdirs = [];
+    try { subdirs = fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory()); } catch { return; }
+    for (const e of subdirs) {
+      if (--budget < 0) return;
+      const n = e.name.toLowerCase();
+      if (n.startsWith('.') || SKIP_DIRS.has(n) || excludeRes.some((re) => re.test(n))) continue;
+      const full = path.join(dir, e.name);
+      if (isProjectDir(full)) found.push(full);
+      else if (level < depth) walk(full, level + 1);
+    }
+  };
+  for (const r of roots) { if (isDir(r)) walk(r, 1); }
+  return found;
+}
+
+function buildProjects() {
+  const cfg = readConfig();
+  const sessions = sessionIndex();
+  const excludeRes = (cfg.exclude || []).map(globToRegex);
+  const isExcluded = (name) => excludeRes.some((re) => re.test(String(name).toLowerCase()));
+  const found = new Map();
+
+  const add = (p, name, pinned = false) => {
+    if (!isDir(p)) return;
+    const key = normKey(p);
+    if (found.has(key)) {
+      if (pinned) { const it = found.get(key); it.pinned = true; it.name = name; }
+      return;
+    }
+    const sess = sessions.get(key);
+    let folderMtime = 0;
+    try { folderMtime = fs.statSync(p).mtimeMs / 1000; } catch { /* keep 0 */ }
+    found.set(key, { name, path: String(p), pinned, last_session: sess ? sess[1] : null, activity: sess ? sess[1] : folderMtime });
+  };
+
+  for (const item of cfg.pinned || []) add(item.path, item.name || path.basename(item.path), true);
+
+  const scanRoots = [...(cfg.scan_roots || [])];
+  if (cfg.new_projects_path) scanRoots.push(cfg.new_projects_path);
+  for (const root of scanRoots) {
+    let kids = [];
+    try { kids = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
+    for (const k of kids) { if (k.isDirectory() && !isExcluded(k.name)) add(path.join(root, k.name), k.name); }
+  }
+
+  for (const p of autoScan(cfg, excludeRes)) add(p, path.basename(p));
+
+  for (const [key, [cwd]] of sessions) {
+    if (isExcluded(path.basename(cwd))) continue;
+    add(cwd, key === normKey(HOME) ? 'Home' : path.basename(cwd));
+  }
+
+  const order = new Map((cfg.order || []).map((p, i) => [normKey(p), i]));
+  const rank = (x) => (order.has(normKey(x.path)) ? order.get(normKey(x.path)) : order.size);
+  return [...found.values()].sort((a, b) => (Number(!a.pinned) - Number(!b.pinned)) || (rank(a) - rank(b)) || (b.activity - a.activity));
+}
+
+ipcMain.handle('projects:list', () => {
+  try { return { projects: buildProjects() }; } catch (e) { return { error: `Failed to read projects: ${e.message}` }; }
+});
+
+// Minimal Greek strings for the few main-process texts that are translated (the renderer sends its language).
+const EL_MAIN = {
+  'Unpin': 'Ξεκαρφίτσωμα',
+  'Pin to top': 'Καρφίτσωμα (πάνω-πάνω)',
+  'Open folder': 'Άνοιγμα φακέλου',
+  'Copy path': 'Αντιγραφή διαδρομής',
+  'Reset order (recent first)': 'Επαναφορά σειράς (πρόσφατα πρώτα)',
+  'No previous session - starting a new one': 'Δεν υπάρχει προηγούμενη συνεδρία - ξεκινάει νέα',
+};
+const tr = (lang, en) => (lang === 'el' && EL_MAIN[en]) || en;
+
+function spawnPty(id, kind, cwd, resume, cols, rows, lang) {
   const claude = findClaude();
   const args = resume ? ['--continue'] : [];
   let file = claude || 'cmd.exe';
@@ -420,18 +547,28 @@ function spawnPty(id, kind, cwd, resume, cols, rows) {
     const noConversation = /No conversation found/i.test(tail);
     if (current && kind !== 'auth' && resume && e.exitCode !== 0 && (noConversation || Date.now() - startedAt < 5000)) {
       ptys.delete(id);
-      if (win) win.webContents.send('pty:data', id, '\r\n\x1b[33m[Δεν υπάρχει προηγούμενη συνεδρία - ξεκινάει νέα]\x1b[0m\r\n');
-      try { spawnPty(id, kind, cwd, false, p.cols, p.rows); return; } catch { /* report the exit below */ }
+      if (win) win.webContents.send('pty:data', id, `\r\n\x1b[33m[${tr(lang, 'No previous session - starting a new one')}]\x1b[0m\r\n`);
+      try { spawnPty(id, kind, cwd, false, p.cols, p.rows, lang); return; } catch { /* report the exit below */ }
     }
     if (current) { ptys.delete(id); stopWatch(id); }
     if (win) win.webContents.send('pty:exit', id, e.exitCode);
   });
 }
 
-ipcMain.handle('pty:spawn', (_e, { id, kind, cwd, resume, cols, rows }) => {
+function onPath(cmd) {
+  try { execFileSync('where', [cmd], { stdio: 'ignore', windowsHide: true }); return true; } catch { return false; }
+}
+
+ipcMain.handle('pty:spawn', (_e, { id, kind, cwd, resume, cols, rows, lang }) => {
   if (ptys.has(id)) return { ok: true };
+  if (kind === 'auth' && !process.env.HUB_AUTH_DRYRUN && !onPath('gcloud')) {
+    return { ok: false, error: 'Google Cloud CLI (gcloud) was not found. The Auth button is only needed if you use Claude through Google Vertex AI. If you use a Claude subscription or an API key, run "claude" and log in there instead. Otherwise install gcloud: https://cloud.google.com/sdk/docs/install' };
+  }
+  if (kind !== 'auth' && !findClaude() && !onPath('claude')) {
+    return { ok: false, error: 'Claude Code was not found on this computer. Install it from https://claude.com/claude-code (or run: npm install -g @anthropic-ai/claude-code), then reopen this tab. If you have just installed it, restart Claude Hub so it picks up the new PATH.' };
+  }
   try {
-    spawnPty(id, kind, cwd, resume, cols, rows);
+    spawnPty(id, kind, cwd, resume, cols, rows, lang);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -502,18 +639,18 @@ ipcMain.handle('clipboard:read', async () => {
 
 ipcMain.on('clipboard:write', (_e, text) => clipboard.writeText(String(text)));
 
-ipcMain.on('project:menu', (e, { path: projectPath, pinned }) => {
+ipcMain.on('project:menu', (e, { path: projectPath, pinned, lang }) => {
   const p = String(projectPath);
   let isDir = false;
   try { isDir = fs.statSync(p).isDirectory(); } catch { /* missing folder */ }
   const act = (action) => () => e.sender.send('project:action', { action, path: p });
   Menu.buildFromTemplate([
-    { label: pinned ? 'Ξεκαρφίτσωμα' : 'Καρφίτσωμα (πάνω-πάνω)', click: act('pin') },
+    { label: tr(lang, pinned ? 'Unpin' : 'Pin to top'), click: act('pin') },
     { type: 'separator' },
-    { label: 'Άνοιγμα φακέλου', enabled: isDir, click: () => shell.openPath(p) },
-    { label: 'Αντιγραφή διαδρομής', click: () => clipboard.writeText(p) },
+    { label: tr(lang, 'Open folder'), enabled: isDir, click: () => shell.openPath(p) },
+    { label: tr(lang, 'Copy path'), click: () => clipboard.writeText(p) },
     { type: 'separator' },
-    { label: 'Επαναφορά σειράς (πρόσφατα πρώτα)', click: act('resetOrder') },
+    { label: tr(lang, 'Reset order (recent first)'), click: act('resetOrder') },
   ]).popup({ window: BrowserWindow.fromWebContents(e.sender) });
 });
 
@@ -569,7 +706,7 @@ function readHubSettings() {
 function cleanEnvMap(input) {
   const out = {};
   for (const [k, v] of Object.entries(input || {})) {
-    if (!ENV_NAME.test(k)) throw new Error(`Μη έγκυρο όνομα μεταβλητής: ${k}`);
+    if (!ENV_NAME.test(k)) throw new Error(`Invalid variable name: ${k}`);
     out[k] = String(v).replace(/[\r\n]+/g, ' ');
   }
   return out;
@@ -577,7 +714,7 @@ function cleanEnvMap(input) {
 
 ipcMain.handle('claude:get', () => {
   const r = readJsonFile(SETTINGS_FILE);
-  if (!r.ok) return { error: `Το settings.json δεν είναι έγκυρο JSON: ${r.error}`, path: SETTINGS_FILE };
+  if (!r.ok) return { error: `settings.json is not valid JSON: ${r.error}`, path: SETTINGS_FILE };
   const s = r.data;
   const env = s.env || {};
   const perms = s.permissions || {};
@@ -603,11 +740,11 @@ ipcMain.handle('claude:get', () => {
 ipcMain.handle('claude:set', (_e, patch) => {
   try {
     const r = readJsonFile(SETTINGS_FILE);
-    if (!r.ok) throw new Error(`Το settings.json δεν είναι έγκυρο JSON: ${r.error}`);
+    if (!r.ok) throw new Error(`settings.json is not valid JSON: ${r.error}`);
     const s = r.data;
-    if (!VALID_MODES.has(patch.defaultMode) && patch.defaultMode !== (s.permissions || {}).defaultMode) throw new Error('Μη έγκυρο permission mode.');
-    if (patch.defaultMode === 'bypassPermissions' && patch.bypassAllowed === false) throw new Error('Το bypass mode είναι απενεργοποιημένο. Τσέκαρε "Να επιτρέπεται το bypass mode" ή διάλεξε άλλο mode.');
-    if (!['latest', 'stable'].includes(patch.channel)) throw new Error('Μη έγκυρο κανάλι ενημερώσεων.');
+    if (!VALID_MODES.has(patch.defaultMode) && patch.defaultMode !== (s.permissions || {}).defaultMode) throw new Error('Invalid permission mode.');
+    if (patch.defaultMode === 'bypassPermissions' && patch.bypassAllowed === false) throw new Error('Bypass mode is disabled. Check "Allow bypass mode" or pick another mode.');
+    if (!['latest', 'stable'].includes(patch.channel)) throw new Error('Invalid update channel.');
     const list = (v) => (Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean) : []);
     const env = cleanEnvMap(patch.env);
     const gcloudEnv = cleanEnvMap(patch.gcloudEnv);
@@ -649,7 +786,7 @@ function describeMcp(name, v, scope, where) {
 function claudeCli(args, opts, cb) {
   const claude = findClaude();
   if (!claude && args.some((a) => /[&|<>^%"\r\n]/.test(a))) {
-    const msg = 'Άρνηση εκτέλεσης: το claude.exe δεν βρέθηκε και τα ορίσματα περιέχουν ειδικούς χαρακτήρες του cmd (& | < > ^ % ").';
+    const msg = 'Refusing to run: claude.exe was not found and the arguments contain special cmd characters (& | < > ^ % ").';
     cb(new Error(msg), '', msg);
     return;
   }
@@ -678,7 +815,7 @@ ipcMain.handle('mcp:list', (_e, cwd) => {
 ipcMain.handle('mcp:check', (_e, cwd) => new Promise((resolve) => {
   claudeCli(['mcp', 'list'], { cwd: cwd && isDir(cwd) ? cwd : HOME }, (err, stdout, stderr) => {
     const text = `${stdout || ''}${stderr || ''}`.replace(/\u001b\[[0-9;]*m/g, '').trim();
-    resolve(text || (err ? err.message : 'Καμία έξοδος.'));
+    resolve(text || (err ? err.message : 'No output.'));
   });
 }));
 
@@ -700,7 +837,7 @@ function tokenize(line) {
       started = true;
     }
   }
-  if (quote) return { tokens, error: 'Ανοιχτό εισαγωγικό στην εντολή.' };
+  if (quote) return { tokens, error: 'Unclosed quote in the command.' };
   if (started) tokens.push(cur);
   return { tokens };
 }
@@ -710,17 +847,17 @@ ipcMain.handle('mcp:add', (_e, o) => new Promise((resolve) => {
   const scope = ['user', 'local', 'project'].includes(o.scope) ? o.scope : 'user';
   const transport = ['stdio', 'http', 'sse'].includes(o.transport) ? o.transport : 'stdio';
   const target = String(o.target || '').trim();
-  if (!MCP_NAME.test(name)) { resolve({ ok: false, error: 'Το όνομα πρέπει να έχει μόνο γράμματα, αριθμούς, - _ .' }); return; }
-  if (!target) { resolve({ ok: false, error: transport === 'stdio' ? 'Γράψε την εντολή.' : 'Γράψε το URL.' }); return; }
+  if (!MCP_NAME.test(name)) { resolve({ ok: false, error: 'The name may only contain letters, numbers, - _ .' }); return; }
+  if (!target) { resolve({ ok: false, error: transport === 'stdio' ? 'Enter the command.' : 'Enter the URL.' }); return; }
   let args;
   if (transport === 'stdio') {
     const envArgs = [];
     for (const pair of o.env || []) {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(pair)) { resolve({ ok: false, error: `Μη έγκυρο env: ${pair}` }); return; }
+      if (!/^[A-Za-z_][A-Za-z0-9_]*=/.test(pair)) { resolve({ ok: false, error: `Invalid env: ${pair}` }); return; }
       envArgs.push('-e', pair);
     }
     const parsed = tokenize(target);
-    if (parsed.error || !parsed.tokens.length) { resolve({ ok: false, error: parsed.error || 'Γράψε την εντολή.' }); return; }
+    if (parsed.error || !parsed.tokens.length) { resolve({ ok: false, error: parsed.error || 'Enter the command.' }); return; }
     args = ['mcp', 'add', '--scope', scope, name, ...envArgs, '--', ...parsed.tokens];
   } else {
     args = ['mcp', 'add', '--transport', transport, '--scope', scope, name, target];
@@ -733,7 +870,7 @@ ipcMain.handle('mcp:add', (_e, o) => new Promise((resolve) => {
 ipcMain.handle('mcp:remove', (_e, o) => new Promise((resolve) => {
   const name = String(o.name || '');
   const scope = ['user', 'local', 'project'].includes(o.scope) ? o.scope : 'user';
-  if (!MCP_NAME.test(name)) { resolve({ ok: false, error: 'Μη έγκυρο όνομα.' }); return; }
+  if (!MCP_NAME.test(name)) { resolve({ ok: false, error: 'Invalid name.' }); return; }
   claudeCli(['mcp', 'remove', name, '--scope', scope], { cwd: o.cwd && isDir(o.cwd) ? o.cwd : HOME }, (err, stdout, stderr) => {
     resolve(err ? { ok: false, error: `${stderr || err.message}`.trim() } : { ok: true });
   });
@@ -746,7 +883,7 @@ ipcMain.handle('settings:get', () => {
 
 ipcMain.handle('settings:set', (_e, newPath, dryRun) => {
   const p = String(newPath || '').trim();
-  if (!p || !path.isAbsolute(p)) return { ok: false, error: 'Δώσε πλήρη διαδρομή, π.χ. C:/Users/.../Projects' };
+  if (!p || !path.isAbsolute(p)) return { ok: false, error: 'Enter a full path, e.g. C:/Users/.../Projects' };
   const r = readConfigStrict();
   if (!r.ok) return { ok: false, error: r.error };
   if (dryRun) return { ok: true };
@@ -766,14 +903,14 @@ ipcMain.handle('dialog:folder', async (e, defaultPath) => {
 
 ipcMain.handle('project:create', (_e, rawName) => {
   const name = String(rawName || '').trim();
-  if (!name) return { ok: false, error: 'Γράψε ένα όνομα.' };
+  if (!name) return { ok: false, error: 'Enter a name.' };
   if (name.length > 100 || /[<>:"/\\|?*\u0000-\u001f]/.test(name) || /[. ]$/.test(name) || RESERVED.test(name)) {
-    return { ok: false, error: 'Μη έγκυρο όνομα φακέλου (απαγορεύονται: \\ / : * ? " < > | και τελεία/κενό στο τέλος).' };
+    return { ok: false, error: 'Invalid folder name (not allowed: \\ / : * ? " < > | or a trailing dot/space).' };
   }
   const base = newProjectsBase();
   const target = path.join(base, name);
-  if (path.relative(base, target).startsWith('..')) return { ok: false, error: 'Μη έγκυρο όνομα.' };
-  if (fs.existsSync(target)) return { ok: false, error: 'Υπάρχει ήδη φάκελος με αυτό το όνομα.' };
+  if (path.relative(base, target).startsWith('..')) return { ok: false, error: 'Invalid name.' };
+  if (fs.existsSync(target)) return { ok: false, error: 'A folder with this name already exists.' };
   try { fs.mkdirSync(target, { recursive: true }); } catch (err) { return { ok: false, error: err.message }; }
   return { ok: true, path: target, name };
 });

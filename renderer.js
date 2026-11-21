@@ -24,10 +24,10 @@ const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
 function ago(ts) {
   if (!ts) return '';
   const s = Math.max(0, Date.now() / 1000 - ts);
-  if (s < 90) return 'τώρα';
-  if (s < 3600) return `πριν ${Math.floor(s / 60)}λ`;
-  if (s < 86400) return `πριν ${Math.floor(s / 3600)}ω`;
-  return `πριν ${Math.floor(s / 86400)}μ`;
+  if (s < 90) return t('now');
+  if (s < 3600) return t('{n}m ago', { n: Math.floor(s / 60) });
+  if (s < 86400) return t('{n}h ago', { n: Math.floor(s / 3600) });
+  return t('{n}d ago', { n: Math.floor(s / 86400) });
 }
 
 function el(tag, cls, text) {
@@ -43,7 +43,7 @@ function renderList() {
   listEl.textContent = '';
   const shown = projects.filter((p) => `${p.name} ${p.path}`.toLowerCase().includes(q));
   if (!shown.length) {
-    listEl.appendChild(el('li', 'msg', projects.length ? 'Κανένα αποτέλεσμα.' : 'Φόρτωση...'));
+    listEl.appendChild(el('li', 'msg', projects.length ? t('No results.') : t('Loading...')));
     return shown;
   }
   const lastPinned = q ? -1 : shown.reduce((n, p, i) => (p.pinned ? i : n), -1);
@@ -62,12 +62,12 @@ function renderList() {
     txt.appendChild(el('div', 'sub', when ? `${when}  •  ${p.path}` : p.path));
     li.appendChild(txt);
     const pin = el('button', 'pinbtn', p.pinned ? '★' : '☆');
-    pin.title = p.pinned ? 'Ξεκαρφίτσωμα' : 'Καρφίτσωμα στην κορυφή';
+    pin.title = p.pinned ? t('Unpin') : t('Pin to top');
     pin.addEventListener('click', (e) => { e.stopPropagation(); togglePin(p); });
     pin.addEventListener('mousedown', (e) => e.stopPropagation());
     li.appendChild(pin);
     li.addEventListener('click', () => openProject(p));
-    li.addEventListener('contextmenu', (e) => { e.preventDefault(); window.hub.projectMenu(p.path, p.pinned); });
+    li.addEventListener('contextmenu', (e) => { e.preventDefault(); window.hub.projectMenu(p.path, p.pinned, lang()); });
     if (!q) setupRowDrag(li, p);
     listEl.appendChild(li);
   });
@@ -162,11 +162,11 @@ function renderTabs() {
     tab.appendChild(el('span', null, s.project.name));
     if (s.newFiles) {
       const badge = el('span', 'newbadge', String(s.newFiles));
-      badge.title = 'Νέα αρχεία από το Claude';
+      badge.title = t('New files from Claude');
       tab.appendChild(badge);
     }
     const x = el('button', 'x', '×');
-    x.title = 'Κλείσιμο';
+    x.title = t('Close');
     x.addEventListener('click', (e) => { e.stopPropagation(); closeSession(s); });
     tab.appendChild(x);
     tab.addEventListener('click', () => activate(s.key));
@@ -236,7 +236,7 @@ function zoomTerm(delta) {
   if (next === cur) return;
   localStorage.setItem('termFontSize', String(next));
   applyTermFont();
-  flashHint(`Μέγεθος γραμμάτων: ${next}`);
+  flashHint(t('Font size: {n}', { n: next }));
 }
 
 function applyTermFont() {
@@ -336,7 +336,7 @@ function createSession(project) {
     if (ev.code === 'Equal' || ev.code === 'NumpadAdd') { ev.preventDefault(); zoomTerm(1); return false; }
     if (ev.code === 'Minus' || ev.code === 'NumpadSubtract') { ev.preventDefault(); zoomTerm(-1); return false; }
     if (ev.code === 'Digit0' || ev.code === 'Numpad0') { ev.preventDefault(); zoomTerm(0); return false; }
-    // ev.code is the physical key, so this works with any layout (e.g. Greek, where Ctrl+V gives key 'ν').
+    // ev.code is the physical key, so this works with any layout (e.g. Greek, where Ctrl+V gives a non-Latin key).
     const k = ev.code === 'KeyV' ? 'v' : ev.code === 'KeyC' ? 'c' : ev.key.toLowerCase();
     if (k === 'v' && !ev.altKey) {
       // Paste explicitly via the main-process clipboard: the native paste event
@@ -386,10 +386,10 @@ async function startPty(s) {
   s.fit.fit();
   const resumeLast = localStorage.getItem('resumeLast') !== '0';
   const resume = (resumeLast && Boolean(s.project.last_session)) || s.typed;
-  const res = await window.hub.spawn({ id: s.id, kind: s.project.special || 'claude', cwd: s.project.path, resume, cols: s.term.cols, rows: s.term.rows });
+  const res = await window.hub.spawn({ id: s.id, kind: s.project.special || 'claude', cwd: s.project.path, resume, cols: s.term.cols, rows: s.term.rows, lang: lang() });
   s.started = true;
   if (!res.ok) {
-    s.term.write(`\r\n\x1b[31mΑποτυχία εκκίνησης: ${res.error}\x1b[0m\r\n`);
+    s.term.write(`\r\n\x1b[31m${t('Failed to start: {error}', { error: res.error })}\x1b[0m\r\n`);
     return;
   }
   s.alive = true;
@@ -416,7 +416,7 @@ async function openProject(project) {
 }
 
 function closeSession(s) {
-  if (s.alive && !confirm(`Το "${s.project.name}" τρέχει ακόμα. Να κλείσει;`)) return;
+  if (s.alive && !confirm(t('"{name}" is still running. Close it?', { name: s.project.name }))) return;
   window.hub.kill(s.id);
   s.term.dispose();
   s.el.remove();
@@ -464,8 +464,8 @@ window.hub.onExit((id, code) => {
   const s = byId.get(id);
   if (!s) return;
   s.alive = false;
-  const what = s.project.special === 'auth' ? 'Η σύνδεση ολοκληρώθηκε' : 'Το claude έκλεισε';
-  s.term.write(`\r\n\x1b[33m[${what} (κωδικός ${code}). Πάτα Enter για επανεκκίνηση.]\x1b[0m\r\n`);
+  const what = s.project.special === 'auth' ? t('Login finished') : t('claude exited');
+  s.term.write(`\r\n\x1b[33m${t('[{what} (code {code}). Press Enter to restart.]', { what, code })}\x1b[0m\r\n`);
   renderTabs();
 });
 
@@ -476,7 +476,7 @@ let hintTimer;
 function flashHint(msg) {
   hintEl.textContent = msg;
   clearTimeout(hintTimer);
-  hintTimer = setTimeout(() => { hintEl.textContent = 'Σύρε εδώ αρχεία/φακέλους ή πάτα Ctrl+V'; }, 3500);
+  hintTimer = setTimeout(() => { hintEl.textContent = t('Drop files/folders here or press Ctrl+V'); }, 3500);
 }
 
 function extFromMime(type) {
@@ -510,7 +510,7 @@ function renderChips() {
       li.classList.add('card');
       const img = el('img', 'preview');
       img.src = fileUrl(item.path);
-      img.title = 'Κλικ για μεγέθυνση';
+      img.title = t('Click to enlarge');
       img.addEventListener('click', () => showImage(img.src));
       li.appendChild(img);
     } else {
@@ -521,10 +521,10 @@ function renderChips() {
     name.title = item.path;
     li.appendChild(name);
     const again = el('button', null, '↩');
-    again.title = 'Στείλε ξανά στο ενεργό terminal';
+    again.title = t('Send again to the active terminal');
     again.addEventListener('click', () => insertPaths([item.path]));
     const rm = el('button', null, '×');
-    rm.title = 'Αφαίρεση από τη λίστα';
+    rm.title = t('Remove from list');
     rm.addEventListener('click', () => { inboxByKey.set(activeKey, currentInbox().filter((i) => i !== item)); renderChips(); });
     li.appendChild(again);
     li.appendChild(rm);
@@ -534,7 +534,7 @@ function renderChips() {
 
 function insertPaths(paths, session) {
   const s = session || sessions.get(activeKey);
-  if (!s || !s.alive) { flashHint('Άνοιξε πρώτα ένα project για να σταλεί'); return; }
+  if (!s || !s.alive) { flashHint(t('Open a project first to send it')); return; }
   s.term.paste(`${paths.map((p) => `"${p}"`).join(' ')} `);
   s.term.focus();
 }
@@ -549,7 +549,7 @@ function addItems(items, insert, key = activeKey) {
 
 function requireProject() {
   if (activeKey && sessions.get(activeKey)) return activeKey;
-  flashHint('Άνοιξε πρώτα ένα project για να προστεθούν αρχεία');
+  flashHint(t('Open a project first to add files'));
   return null;
 }
 
@@ -571,7 +571,7 @@ async function pasteFromClipboard() {
   const r = await readClipboardData();
   if (r.type === 'image') addItems([{ path: r.path, isImage: true }], true, key);
   else if (r.type === 'text') addItems([{ path: await window.hub.saveText(r.text), isImage: false }], true, key);
-  else flashHint('Το clipboard είναι άδειο');
+  else flashHint(t('The clipboard is empty'));
 }
 
 function updatePanelTitles() {
@@ -681,17 +681,17 @@ function renderOutputs() {
   if (!shown.length) {
     const hidden = mine.length - shown.length;
     outList.appendChild(el('li', 'empty', hidden > 0
-      ? `${hidden} αρχεία κώδικα κρύβονται (ξετσέκαρε "μόνο παραδοτέα" για να τα δεις).`
+      ? t('{n} code files hidden (uncheck "deliverables only" to show them).', { n: hidden })
       : activeKey
-        ? 'Όταν το Claude δημιουργήσει αρχείο σε αυτό το project, θα εμφανιστεί εδώ για αποθήκευση.'
-        : 'Διάλεξε project για να δεις τα αρχεία του.'));
+        ? t('When Claude creates a file in this project, it will appear here so you can save it.')
+        : t('Pick a project to see its files.')));
     return;
   }
   for (const o of shown) {
     const li = el('li', 'out');
     if (o.fresh) li.classList.add('fresh');
     li.draggable = true;
-    li.title = 'Σύρε το σε οποιοδήποτε φάκελο ή εφαρμογή';
+    li.title = t('Drag it to any folder or app');
     li.addEventListener('dragstart', (e) => { e.preventDefault(); window.hub.startDrag(o.path); });
 
     if (IMAGE_EXT.test(o.name)) {
@@ -711,15 +711,15 @@ function renderOutputs() {
     li.appendChild(el('div', 'ometa', `${o.projectName}  •  ${fmtSize(o.size)}  •  ${fmtTime(o.mtime)}`));
 
     const btns = el('div', 'obtns');
-    const save = el('button', 'save', 'Αποθήκευση...');
+    const save = el('button', 'save', t('Save as...'));
     save.addEventListener('click', async () => {
       const r = await window.hub.saveFile(o.path);
-      if (r.saved) { save.textContent = 'Αποθηκεύτηκε'; setTimeout(() => { save.textContent = 'Αποθήκευση...'; }, 2200); }
-      else if (r.error) { save.textContent = 'Σφάλμα'; save.title = r.error; }
+      if (r.saved) { save.textContent = t('Saved'); setTimeout(() => { save.textContent = t('Save as...'); }, 2200); }
+      else if (r.error) { save.textContent = t('Error'); save.title = r.error; }
     });
-    const open = el('button', null, 'Άνοιγμα');
+    const open = el('button', null, t('Open'));
     open.addEventListener('click', () => window.hub.openFile(o.path));
-    const reveal = el('button', null, 'Φάκελος');
+    const reveal = el('button', null, t('Folder'));
     reveal.addEventListener('click', () => window.hub.revealFile(o.path));
     btns.append(save, open, reveal);
     li.appendChild(btns);
@@ -802,12 +802,12 @@ function updateSample() {
 }
 
 const MODE_LABELS = {
-  default: 'default (ρωτάει για κάθε εργαλείο)',
-  acceptEdits: 'acceptEdits (δέχεται αυτόματα αλλαγές αρχείων)',
-  plan: 'plan (μόνο σχεδιασμός, χωρίς αλλαγές)',
-  dontAsk: 'dontAsk (απορρίπτει ό,τι δεν είναι προεγκεκριμένο)',
-  auto: 'auto (αυτόματη έγκριση με ελέγχους ασφαλείας)',
-  bypassPermissions: 'bypassPermissions (καμία ερώτηση)',
+  default: t('default (asks before each tool)'),
+  acceptEdits: t('acceptEdits (auto-accepts file edits)'),
+  plan: t('plan (planning only, no changes)'),
+  dontAsk: t('dontAsk (denies anything not pre-approved)'),
+  auto: t('auto (auto-approves with safety checks)'),
+  bypassPermissions: t('bypassPermissions (never asks)'),
 };
 const cl = {
   path: $('#cl-path'), model: $('#cl-model'), note: $('#cl-model-note'), mode: $('#cl-mode'), warn: $('#cl-mode-warn'),
@@ -869,11 +869,11 @@ function fillClaude(st) {
   cl.path.textContent = st.path;
   cl.model.value = st.model;
   cl.note.textContent = st.modelSource === 'env'
-    ? 'Αποθηκεύεται στο env ANTHROPIC_MODEL (το χρησιμοποιεί ήδη το settings.json σου και υπερισχύει του κλειδιού model).'
-    : 'Αποθηκεύεται στο κλειδί model του settings.json. Αν οριστεί ANTHROPIC_MODEL στο περιβάλλον, αυτό υπερισχύει.';
+    ? t('Saved to the ANTHROPIC_MODEL env (your settings.json already uses it, and it overrides the model key).')
+    : t('Saved to the model key in settings.json. If ANTHROPIC_MODEL is set in the environment, it takes precedence.');
   cl.mode.textContent = '';
   for (const m of st.modes) {
-    const opt = el('option', null, MODE_LABELS[m] || `${m} (δεν το δέχεται αυτή η έκδοση του Claude)`);
+    const opt = el('option', null, MODE_LABELS[m] || t('{mode} (not supported by this Claude version)', { mode: m }));
     opt.value = m;
     cl.mode.appendChild(opt);
   }
@@ -916,7 +916,7 @@ async function refreshMcp() {
   const box = $('#mcp-list');
   const items = await window.hub.mcpList(activeProjectPath());
   box.textContent = '';
-  if (!items.length) { box.appendChild(el('div', 'mcpnone', 'Δεν υπάρχουν MCP servers.')); return; }
+  if (!items.length) { box.appendChild(el('div', 'mcpnone', t('No MCP servers.'))); return; }
   for (const it of items) {
     const row = el('div', 'mcprow');
     row.appendChild(el('span', 'mname', it.name));
@@ -924,10 +924,10 @@ async function refreshMcp() {
     const target = el('span', 'mtarget', `${it.type}: ${it.target}`);
     target.title = it.target;
     row.appendChild(target);
-    const rm = el('button', null, 'Διαγραφή');
+    const rm = el('button', null, t('Delete'));
     rm.type = 'button';
     rm.addEventListener('click', async () => {
-      if (!confirm(`Διαγραφή του MCP server "${it.name}" (${it.scope});`)) return;
+      if (!confirm(t('Delete MCP server "{name}" ({scope})?', { name: it.name, scope: it.scope }))) return;
       const r = await window.hub.mcpRemove({ name: it.name, scope: it.scope, cwd: it.where });
       $('#set-error').textContent = r.ok ? '' : r.error;
       refreshMcp();
@@ -940,7 +940,7 @@ async function refreshMcp() {
 $('#mcp-check').addEventListener('click', async () => {
   const out = $('#mcp-check-out');
   out.hidden = false;
-  out.textContent = 'Έλεγχος σύνδεσης...';
+  out.textContent = t('Checking connection...');
   out.textContent = await window.hub.mcpCheck(activeProjectPath());
 });
 for (const id of ['#mcp-name', '#mcp-target', '#mcp-env']) {
@@ -953,7 +953,7 @@ $('#mcp-add-cancel').addEventListener('click', () => { $('#mcp-add').hidden = tr
 $('#mcp-add-go').addEventListener('click', async () => {
   const scope = $('#mcp-scope').value;
   const cwd = activeProjectPath();
-  if (scope !== 'user' && !cwd) { $('#set-error').textContent = 'Για local/project scope άνοιξε πρώτα ένα project.'; return; }
+  if (scope !== 'user' && !cwd) { $('#set-error').textContent = t('For local/project scope, open a project first.'); return; }
   const r = await window.hub.mcpAdd({
     name: $('#mcp-name').value.trim(),
     transport: $('#mcp-transport').value,
@@ -978,6 +978,7 @@ async function showSettings() {
   $('#set-webgl').checked = localStorage.getItem('termWebgl') !== '0';
   $('#set-resume').checked = localStorage.getItem('resumeLast') !== '0';
   $('#set-theme').value = currentTheme();
+  $('#set-lang').value = ['en', 'el'].includes(localStorage.getItem('hubLang')) ? localStorage.getItem('hubLang') : 'auto';
   updateSample();
   $('#set-error').textContent = '';
   const st = await window.hub.claudeGet();
@@ -1038,6 +1039,8 @@ dlgSet.addEventListener('submit', async (e) => {
   localStorage.setItem('termWebgl', $('#set-webgl').checked ? '1' : '0');
   localStorage.setItem('resumeLast', $('#set-resume').checked ? '1' : '0');
   localStorage.setItem('hubTheme', $('#set-theme').value === 'light' ? 'light' : 'dark');
+  const langSel = $('#set-lang').value;
+  if (langSel === 'en' || langSel === 'el') localStorage.setItem('hubLang', langSel); else localStorage.removeItem('hubLang');
   applyTheme();
   applyTermFont();
   applyWebgl();
