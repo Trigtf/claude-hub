@@ -14,7 +14,17 @@ Pick a project, and Claude continues the last conversation there.
 
 No Python or other tools are required.
 
-## Run it
+## Download (easiest)
+
+Get `Claude-Hub-<version>-portable.exe` from the
+[Releases page](https://github.com/Trigtf/claude-hub/releases/latest) and double-click it.
+No installation, no Node.js needed. You still need Claude Code (see above).
+
+> **Windows SmartScreen:** the exe is not code-signed yet, so Windows may show
+> "Windows protected your PC". Click **More info**, then **Run anyway**. You can inspect the
+> source here and build it yourself with `npm run dist`.
+
+## Run from source
 
 ```
 git clone https://github.com/Trigtf/claude-hub.git
