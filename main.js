@@ -45,6 +45,7 @@ function newProjectsBase() {
 
 let win;
 const ptys = new Map();
+const ptyCwd = new Map();
 
 const JUNK_DIRS = new Set(['node_modules', '.git', '.hg', '.svn', '.claude', '__pycache__', 'venv', '.venv', '.cache', '.next', '.idea', '.vscode', '$recycle.bin']);
 const JUNK_FILE = /(^~\$)|(\.(tmp|swp|swo|crdownload|part|lnk)$)|(~$)|^(thumbs\.db|desktop\.ini)$/i;
@@ -472,9 +473,11 @@ function buildProjects() {
   const isExcluded = (name) => excludeRes.some((re) => re.test(String(name).toLowerCase()));
   const found = new Map();
 
+  const hidden = new Set((cfg.hidden || []).map(normKey));
   const add = (p, name, pinned = false) => {
     if (!isDir(p)) return;
     const key = normKey(p);
+    if (hidden.has(key)) return;
     if (found.has(key)) {
       if (pinned) { const it = found.get(key); it.pinned = true; it.name = name; }
       return;
@@ -520,7 +523,20 @@ const EL_MAIN = {
   'Reset order (recent first)': 'Επαναφορά σειράς (πρόσφατα πρώτα)',
   'No previous session - starting a new one': 'Δεν υπάρχει προηγούμενη συνεδρία - ξεκινάει νέα',
 };
+Object.assign(EL_MAIN, {
+  'Hide from list': 'Απόκρυψη από τη λίστα',
+  'Delete project...': 'Διαγραφή project...',
+  'Restore hidden projects ({n})': 'Επαναφορά κρυμμένων projects ({n})',
+  'Move to Recycle Bin': 'Μεταφορά στον Κάδο Ανακύκλωσης',
+  'Cancel': 'Άκυρο',
+  'Delete project "{name}"?': 'Διαγραφή του project "{name}";',
+  'The whole folder will be moved to the Recycle Bin, so you can still restore it from there:': 'Ολόκληρος ο φάκελος θα μεταφερθεί στον Κάδο Ανακύκλωσης, οπότε μπορείς να τον επαναφέρεις από εκεί:',
+  'This folder cannot be deleted from here.': 'Αυτός ο φάκελος δεν μπορεί να διαγραφεί από εδώ.',
+  'Project is not in the list.': 'Το project δεν υπάρχει στη λίστα.',
+  'Could not move the folder to the Recycle Bin: {error}': 'Δεν ήταν δυνατή η μεταφορά του φακέλου στον Κάδο Ανακύκλωσης: {error}',
+});
 const tr = (lang, en) => (lang === 'el' && EL_MAIN[en]) || en;
+const tf = (lang, en, vars = {}) => tr(lang, en).replace(/\{(\w+)\}/g, (m, k) => (k in vars ? vars[k] : m));
 
 function spawnPty(id, kind, cwd, resume, cols, rows, lang) {
   const claude = findClaude();
@@ -540,6 +556,7 @@ function spawnPty(id, kind, cwd, resume, cols, rows, lang) {
     env: { ...process.env, ...(kind === 'auth' ? readHubSettings().gcloudEnv : {}), COLORTERM: 'truecolor', TERM: 'xterm-256color' },
   });
   ptys.set(id, p);
+  ptyCwd.set(id, cwd);
   if (kind !== 'auth') startWatch(id, cwd);
   let tail = '';
   p.onData((d) => {
@@ -648,6 +665,7 @@ ipcMain.on('project:menu', (e, { path: projectPath, pinned, lang }) => {
   let isDir = false;
   try { isDir = fs.statSync(p).isDirectory(); } catch { /* missing folder */ }
   const act = (action) => () => e.sender.send('project:action', { action, path: p });
+  const hiddenCount = (readConfig().hidden || []).length;
   Menu.buildFromTemplate([
     { label: tr(lang, pinned ? 'Unpin' : 'Pin to top'), click: act('pin') },
     { type: 'separator' },
@@ -655,7 +673,70 @@ ipcMain.on('project:menu', (e, { path: projectPath, pinned, lang }) => {
     { label: tr(lang, 'Copy path'), click: () => clipboard.writeText(p) },
     { type: 'separator' },
     { label: tr(lang, 'Reset order (recent first)'), click: act('resetOrder') },
+    { type: 'separator' },
+    { label: tr(lang, 'Hide from list'), click: act('hide') },
+    ...(hiddenCount ? [{ label: tf(lang, 'Restore hidden projects ({n})', { n: hiddenCount }), click: act('unhideAll') }] : []),
+    { label: tr(lang, 'Delete project...'), click: act('delete') },
   ]).popup({ window: BrowserWindow.fromWebContents(e.sender) });
+});
+
+// Hide = just stop listing it (nothing is touched on disk). Stored in config.json as "hidden".
+ipcMain.handle('projects:hide', (_e, projectPath) => {
+  const r = readConfigStrict();
+  if (!r.ok) return { ok: false, error: r.error };
+  const cfg = r.cfg;
+  cfg.hidden = [...(cfg.hidden || []).filter((x) => !sameDir(x, projectPath)), String(projectPath)];
+  cfg.pinned = (cfg.pinned || []).filter((x) => !sameDir(x.path, projectPath));
+  if (cfg.order) cfg.order = cfg.order.filter((x) => !sameDir(x, projectPath));
+  try { writeConfig(cfg); } catch (err) { return { ok: false, error: err.message }; }
+  return { ok: true };
+});
+
+ipcMain.handle('projects:unhideAll', () => {
+  const r = readConfigStrict();
+  if (!r.ok) return { ok: false, error: r.error };
+  delete r.cfg.hidden;
+  try { writeConfig(r.cfg); } catch (err) { return { ok: false, error: err.message }; }
+  return { ok: true };
+});
+
+// Delete = confirm, close that project's terminals, then move the folder to the Recycle Bin (restorable).
+ipcMain.handle('projects:delete', async (e, projectPath, lang) => {
+  const p = String(projectPath);
+  const T = (en, vars) => tf(lang, en, vars);
+  if (!isDir(p) || isShallowDir(p)) return { ok: false, error: T('This folder cannot be deleted from here.') };
+  if (!buildProjects().some((x) => sameDir(x.path, p))) return { ok: false, error: T('Project is not in the list.') };
+  const ans = await dialog.showMessageBox(BrowserWindow.fromWebContents(e.sender), {
+    type: 'warning',
+    buttons: [T('Cancel'), T('Move to Recycle Bin')],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    message: T('Delete project "{name}"?', { name: path.basename(p) }),
+    detail: `${T('The whole folder will be moved to the Recycle Bin, so you can still restore it from there:')}\n\n${p}`,
+  });
+  if (ans.response !== 1) return { ok: false, cancelled: true };
+  for (const [id, cwd] of [...ptyCwd]) {
+    if (!sameDir(cwd, p)) continue;
+    const proc = ptys.get(id);
+    stopWatch(id);
+    ptys.delete(id);
+    ptyCwd.delete(id);
+    if (proc) { try { proc.kill(); } catch { /* already gone */ } }
+  }
+  let lastErr;
+  for (let i = 0; i < 5; i += 1) { // the folder may stay locked for a moment after the terminal closes
+    try { await shell.trashItem(p); lastErr = null; break; } catch (err) { lastErr = err; await new Promise((r) => setTimeout(r, 600)); }
+  }
+  if (lastErr) return { ok: false, error: T('Could not move the folder to the Recycle Bin: {error}', { error: lastErr.message }) };
+  const r = readConfigStrict();
+  if (r.ok) {
+    const cfg = r.cfg;
+    cfg.pinned = (cfg.pinned || []).filter((x) => !sameDir(x.path, p));
+    if (cfg.order) cfg.order = cfg.order.filter((x) => !sameDir(x, p));
+    try { writeConfig(cfg); } catch { /* the folder is gone anyway; the list simply skips missing folders */ }
+  }
+  return { ok: true };
 });
 
 const sameDir = (a, b) => path.normalize(String(a)).toLowerCase() === path.normalize(String(b)).toLowerCase();

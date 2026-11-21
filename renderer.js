@@ -136,6 +136,21 @@ window.hub.onProjectAction(async ({ action, path: projectPath }) => {
     const res = await window.hub.setOrder(null);
     if (!res.ok) alert(res.error);
     await loadProjects();
+  } else if (action === 'hide') {
+    const res = await window.hub.hideProject(projectPath);
+    if (!res.ok) alert(res.error);
+    await loadProjects();
+  } else if (action === 'unhideAll') {
+    const res = await window.hub.unhideAll();
+    if (!res.ok) alert(res.error);
+    await loadProjects();
+  } else if (action === 'delete') {
+    const res = await window.hub.deleteProject(projectPath, lang());
+    if (res.cancelled) return;
+    if (!res.ok) { alert(res.error); return; }
+    const open = sessions.get(keyOf({ path: projectPath }));
+    if (open) { open.alive = false; closeSession(open); } // its terminal was already stopped by the main process
+    await loadProjects();
   }
 });
 
