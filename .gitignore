@@ -1,0 +1,5 @@
+node_modules/
+selftest-*.json
+selftest-*.png
+*.log
+.DS_Store
