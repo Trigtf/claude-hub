@@ -166,7 +166,7 @@ function createWindow() {
     minHeight: 500,
     backgroundColor: '#14161a',
     title: 'Agent Hub',
-    icon: path.join(__dirname, 'assets', 'icon.png'),
+    icon: path.join(__dirname, 'assets', 'icon.ico'),
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -174,6 +174,7 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+  try { win.setIcon(nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.ico'))); } catch { /* icon optional */ }
   win.loadFile('index.html');
   // The window only ever shows index.html: block navigation (e.g. a file dropped outside the drop zone)
   // and new windows, so the UI can never be replaced by other content.
