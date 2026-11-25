@@ -1,8 +1,9 @@
-# Claude Hub
+# Agent Hub
 
-A small desktop app (Electron) that lists your projects and opens a
-[Claude Code](https://claude.com/claude-code) terminal for each one, in tabs.
-Pick a project, and Claude continues the last conversation there.
+A small desktop app (Electron) that lists your projects and opens a coding-agent
+terminal for each one, in tabs: [Claude Code](https://claude.com/claude-code) or
+[opencode](https://opencode.ai). Pick a project, and the agent continues the last
+conversation there.
 
 **Windows only for now.**
 
@@ -10,13 +11,14 @@ Pick a project, and Claude continues the last conversation there.
 
 1. **Windows 10/11**
 2. **Claude Code**, installed and logged in. Check that `claude` runs in a normal terminal first.
-3. **Node.js** (LTS) and **git**, only if you run it from source (see below).
+3. **opencode** (optional), if you prefer it. Install it from [opencode.ai](https://opencode.ai) and choose it in Settings.
+4. **Node.js** (LTS) and **git**, only if you run it from source (see below).
 
 No Python or other tools are required.
 
 ## Download (easiest)
 
-Get `Claude-Hub-<version>-portable.exe` from the
+Get `Agent-Hub-<version>-portable.exe` from the
 [Releases page](https://github.com/Trigtf/claude-hub/releases/latest) and double-click it.
 No installation, no Node.js needed. You still need Claude Code (see above).
 
@@ -27,13 +29,13 @@ No installation, no Node.js needed. You still need Claude Code (see above).
 ## Run from source
 
 ```
-git clone https://github.com/Trigtf/claude-hub.git
-cd claude-hub
+git clone https://github.com/Trigtf/claude-hub.git agent-hub
+cd agent-hub
 npm install
 npm start
 ```
 
-After the first run you can also just double-click `ClaudeHub.bat`.
+After the first run you can also just double-click `AgentHub.bat`.
 
 ## How it works
 
@@ -61,8 +63,8 @@ After the first run you can also just double-click `ClaudeHub.bat`.
 ## Settings
 
 Click the gear icon. You can change the theme (dark/light), the terminal font and size,
-the folder for new projects, whether to resume the last conversation, and
-common Claude Code options (model, permission mode, allow/deny rules, environment variables, MCP servers).
+the folder for new projects, whether to resume the last conversation, the agent that opens in the
+project terminals (Claude Code or opencode), and common Claude Code options (model, permission mode, allow/deny rules, environment variables).
 Claude settings are written to `~/.claude/settings.json`.
 
 The **Auth** button runs `gcloud auth application-default login`. You only need it if you use
@@ -70,7 +72,7 @@ Claude through Google Vertex AI.
 
 ## Privacy
 
-Everything stays on your computer. Claude Hub reads the folder names in `~/.claude/projects`
+Everything stays on your computer. Agent Hub reads the folder names in `~/.claude/projects`
 to find your projects and their last activity, and stores pins and settings in
 `~/.claude/project-launcher/config.json`. Pasted or dropped files are copied to
 `~/.claude/hub-inbox`. They are not deleted automatically, so clear that folder if it contains
@@ -78,7 +80,7 @@ anything sensitive.
 
 ## Troubleshooting
 
-- **"Claude Code was not found"**: install Claude Code, then restart Claude Hub so it sees the new PATH.
+- **"Claude Code was not found"**: install Claude Code, then restart Agent Hub so it sees the new PATH.
 - **Empty project list**: open the gear icon and set the projects folder, or just open a folder
   with `+ Create New Project`.
 

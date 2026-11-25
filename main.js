@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, clipboard, shell, Menu, dialog, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, clipboard, shell, Menu, dialog, nativeImage, screen } = require('electron');
 const { execFile, execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
@@ -46,6 +46,7 @@ function newProjectsBase() {
 let win;
 const ptys = new Map();
 const ptyCwd = new Map();
+const killedPtys = new Set();
 
 const JUNK_DIRS = new Set(['node_modules', '.git', '.hg', '.svn', '.claude', '__pycache__', 'venv', '.venv', '.cache', '.next', '.idea', '.vscode', '$recycle.bin']);
 const JUNK_FILE = /(^~\$)|(\.(tmp|swp|swo|crdownload|part|lnk)$)|(~$)|^(thumbs\.db|desktop\.ini)$/i;
@@ -111,14 +112,54 @@ function findClaude() {
   return candidates.find((c) => c && fs.existsSync(c)) || null;
 }
 
+function findOpencode() {
+  if (process.env.HUB_FORCE_CMD) return null;
+  const candidates = [
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'opencode', 'opencode.exe'),
+    path.join(process.env.APPDATA || '', 'npm', 'opencode.exe'),
+  ];
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (dir) candidates.push(path.join(dir, 'opencode.exe'));
+  }
+  return candidates.find((c) => c && fs.existsSync(c)) || null;
+}
+
+const WINDOW_STATE_FILE = path.join(path.dirname(CONFIG_FILE), 'window-state.json');
+const trackWindowState = () => !process.argv.includes('--selftest');
+
+function loadWindowState() {
+  if (!trackWindowState()) return null;
+  try {
+    const s = JSON.parse(fs.readFileSync(WINDOW_STATE_FILE, 'utf8'));
+    const b = s.bounds;
+    if (!b || ![b.width, b.height].every((n) => Number.isFinite(n) && n > 0)) return null;
+    const bounds = { width: b.width, height: b.height };
+    // Only restore the position if the window would still be reachable on a connected display.
+    const reachable = Number.isFinite(b.x) && Number.isFinite(b.y) && screen.getAllDisplays().some(({ workArea: w }) =>
+      Math.min(b.x + b.width, w.x + w.width) - Math.max(b.x, w.x) >= 100 && Math.min(b.y + b.height, w.y + w.height) - Math.max(b.y, w.y) >= 100);
+    if (reachable) { bounds.x = b.x; bounds.y = b.y; }
+    return { bounds, maximized: Boolean(s.maximized) };
+  } catch { return null; }
+}
+
+function saveWindowState() {
+  if (!trackWindowState() || !win || win.isDestroyed() || win.isMinimized() || win.isFullScreen()) return;
+  try {
+    fs.mkdirSync(path.dirname(WINDOW_STATE_FILE), { recursive: true });
+    fs.writeFileSync(WINDOW_STATE_FILE, JSON.stringify({ bounds: win.getNormalBounds(), maximized: win.isMaximized() }));
+  } catch { /* best effort */ }
+}
+
 function createWindow() {
+  const savedState = loadWindowState();
   win = new BrowserWindow({
     width: 1500,
     height: 920,
+    ...(savedState ? savedState.bounds : {}),
     minWidth: 900,
     minHeight: 500,
     backgroundColor: '#14161a',
-    title: 'Claude Hub',
+    title: 'Agent Hub',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -131,6 +172,11 @@ function createWindow() {
   // and new windows, so the UI can never be replaced by other content.
   win.webContents.on('will-navigate', (e) => e.preventDefault());
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  if (savedState && savedState.maximized) win.maximize();
+  let saveTimer;
+  const scheduleSave = () => { clearTimeout(saveTimer); saveTimer = setTimeout(saveWindowState, 500); };
+  for (const evt of ['resize', 'move', 'maximize', 'unmaximize']) win.on(evt, scheduleSave);
+  win.on('close', () => { clearTimeout(saveTimer); saveWindowState(); });
   win.on('closed', () => { win = null; });
   if (process.argv.includes('--selftest')) win.webContents.once('did-finish-load', runSelfTest);
 }
@@ -225,9 +271,6 @@ async function runSelfTest() {
     report.mcpAddHttp = await js(`window.hub.mcpAdd({ name: 'selftest-http', transport: 'http', scope: 'user', target: 'https://example.com/mcp', cwd: '' })`);
     report.mcpBadName = await js(`window.hub.mcpAdd({ name: 'bad name!', transport: 'stdio', scope: 'user', target: 'x', cwd: '' })`);
     report.mcpList = await js('window.hub.mcpList("")');
-    await js('refreshMcp()');
-    await wait(300);
-    report.mcpRows = await js(`document.querySelectorAll('#mcp-list .mcprow').length`);
     report.mcpRemove = await js(`Promise.all([window.hub.mcpRemove({ name: 'selftest-mcp', scope: 'user', cwd: '' }), window.hub.mcpRemove({ name: 'selftest-http', scope: 'user', cwd: '' })])`);
     report.mcpListAfter = await js('window.hub.mcpList("")');
 
@@ -246,13 +289,12 @@ async function runSelfTest() {
     fs.writeFileSync(CONFIG_FILE, '{ bad');
     report.fix4_pin = await js(`window.hub.pinProject('C:/x', 'x', true)`);
     report.fix4_order = await js(`window.hub.setOrder(['a'])`);
-    report.fix4_dry = await js(`window.hub.setSettings('C:/some/where', true)`);
+    report.fix4_dry = await js(`window.hub.setSettings('C:/some/where', [], true)`);
     report.fix4_untouched = fs.readFileSync(CONFIG_FILE, 'utf8') === '{ bad';
     fs.writeFileSync(CONFIG_FILE, cfgBefore);
     report.fix4_pinOk = await js(`window.hub.pinProject('C:/x', 'x', true)`);
     report.fix4_noTmpLeft = !fs.existsSync(`${CONFIG_FILE}.hub-tmp`);
 
-    report.fix5_enterWired = await js(`(() => { const ev = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }); document.querySelector('#mcp-name').dispatchEvent(ev); return ev.defaultPrevented; })()`);
     report.fix6_url = await js(`fileUrl('C:/a/report #1.png?x')`);
 
     report.fix7_tok = await js(`window.hub.mcpAdd({ name: 'tok-test', transport: 'stdio', scope: 'user', target: 'node --root="C:/my folder" -e 1', env: [], cwd: '' })`);
@@ -319,9 +361,9 @@ async function runSelfTest() {
       return out;
     })()`);
     await shot('selftest-list.png');
-    await click('claude-hub');
+    await click('agent-hub');
     await wait(8000);
-    report.firstTerminal = await dump('claude-hub');
+    report.firstTerminal = await dump('agent-hub');
     await js('openAuth()');
     await wait(5000);
     report.authTab = await dump('gcloud auth');
@@ -357,7 +399,7 @@ async function runSelfTest() {
       const count = (sel) => document.querySelectorAll(sel).length;
       const out = {};
       const newp = [...sessions.values()].find((s) => s.project.name.startsWith('selftest-newproj'));
-      const hub = [...sessions.values()].find((s) => s.project.name.startsWith('claude-hub'));
+      const hub = [...sessions.values()].find((s) => s.project.name.startsWith('agent-hub'));
       activate(newp.key);
       const c = document.createElement('canvas'); c.width = 400; c.height = 240;
       const g = c.getContext('2d'); g.fillStyle = '#2b6cb0'; g.fillRect(0, 0, 400, 240);
@@ -389,6 +431,8 @@ const SESSIONS_DIR = path.join(HOME, '.claude', 'projects');
 const DEFAULT_AUTO_ROOTS = ['Desktop', 'OneDrive/Desktop', 'Documents', 'OneDrive/Documents', 'source/repos', 'repos', 'dev', 'code', 'src', 'projects', 'Projects', 'github', 'GitHub'];
 const MARKER_FILES = new Set(['.git', 'package.json', 'pyproject.toml', 'requirements.txt', 'cargo.toml', 'go.mod', 'pom.xml', 'build.gradle', 'composer.json', 'claude.md']);
 const MARKER_SUFFIXES = ['.sln', '.csproj'];
+const AI_MARKER_FILES = new Set(['claude.md', 'agents.md', 'opencode.json', 'opencode.jsonc', '.claude', '.opencode', '.cursorrules', '.cursor', '.windsurfrules', '.aider.conf.yml']);
+const OPENCODE_DB = process.env.HUB_OPENCODE_DB || path.join(HOME, '.local', 'share', 'opencode', 'opencode.db');
 const SKIP_DIRS = new Set(['node_modules', 'venv', 'env', '__pycache__', 'dist', 'build', 'appdata', 'site-packages']);
 const SCAN_BUDGET = 4000;
 
@@ -419,7 +463,7 @@ function readSessionCwd(file) {
   return null;
 }
 
-function sessionIndex() {
+function claudeSessionIndex() {
   const idx = new Map();
   let dirs = [];
   try { dirs = fs.readdirSync(SESSIONS_DIR, { withFileTypes: true }).filter((d) => d.isDirectory()); } catch { return idx; }
@@ -439,10 +483,61 @@ function sessionIndex() {
   return idx;
 }
 
-function isProjectDir(dir) {
+// opencode keeps its sessions in a SQLite database. Read it best-effort: a missing
+// database, an old schema, or a strict read-only lock simply yields no opencode hits.
+function opencodeSessionIndex() {
+  const idx = new Map();
+  let DatabaseSync;
+  try { ({ DatabaseSync } = require('node:sqlite')); } catch { return idx; }
+  let db;
   try {
-    return fs.readdirSync(dir).some((n) => { const l = n.toLowerCase(); return MARKER_FILES.has(l) || MARKER_SUFFIXES.some((s) => l.endsWith(s)); });
-  } catch { return false; }
+    db = new DatabaseSync(OPENCODE_DB, { readOnly: true });
+    const rows = db.prepare('select directory, max(time_updated) as t from session group by directory').all();
+    for (const row of rows) {
+      if (!row.directory) continue;
+      const ms = Number(row.t) || 0;
+      idx.set(normKey(row.directory), [row.directory, ms > 1e12 ? ms / 1000 : ms]);
+    }
+  } catch { /* database missing, locked or schema changed */ } finally {
+    if (db) { try { db.close(); } catch { /* already closed */ } }
+  }
+  return idx;
+}
+
+function agentSessionIndex() {
+  const idx = new Map();
+  const addHit = (cwd, t, agent) => {
+    if (!cwd) return;
+    const key = normKey(cwd);
+    const cur = idx.get(key);
+    if (!cur) idx.set(key, { cwd: String(cwd), time: t || 0, agents: new Set([agent]) });
+    else { cur.time = Math.max(cur.time, t || 0); cur.agents.add(agent); }
+  };
+  for (const [, [cwd, t]] of claudeSessionIndex()) addHit(cwd, t, 'claude');
+  for (const [, [cwd, t]] of opencodeSessionIndex()) addHit(cwd, t, 'opencode');
+  return idx;
+}
+
+function dirInfo(dir) {
+  try {
+    const names = fs.readdirSync(dir);
+    let root = false;
+    let aiConfig = false;
+    for (const n of names) {
+      const l = n.toLowerCase();
+      if (MARKER_FILES.has(l) || MARKER_SUFFIXES.some((s) => l.endsWith(s))) root = true;
+      if (AI_MARKER_FILES.has(l)) aiConfig = true;
+    }
+    return { root, aiConfig };
+  } catch { return { root: false, aiConfig: false }; }
+}
+
+function childDirs(dir, isExcluded) {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !SKIP_DIRS.has(e.name.toLowerCase()) && !isExcluded(e.name))
+      .map((e) => path.join(dir, e.name));
+  } catch { return []; }
 }
 
 function autoScan(cfg, excludeRes) {
@@ -458,7 +553,8 @@ function autoScan(cfg, excludeRes) {
       const n = e.name.toLowerCase();
       if (n.startsWith('.') || SKIP_DIRS.has(n) || excludeRes.some((re) => re.test(n))) continue;
       const full = path.join(dir, e.name);
-      if (isProjectDir(full)) found.push(full);
+      const info = dirInfo(full);
+      if (info.root) found.push({ path: full, aiConfig: info.aiConfig });
       else if (level < depth) walk(full, level + 1);
     }
   };
@@ -466,48 +562,103 @@ function autoScan(cfg, excludeRes) {
   return found;
 }
 
+function hasListedAncestor(p, found) {
+  let dir = path.dirname(path.normalize(String(p)));
+  while (true) {
+    if (found.has(normKey(dir))) return true;
+    const parent = path.dirname(dir);
+    if (parent === dir) return false;
+    dir = parent;
+  }
+}
+
 function buildProjects() {
   const cfg = readConfig();
-  const sessions = sessionIndex();
+  const sessions = agentSessionIndex();
   const excludeRes = (cfg.exclude || []).map(globToRegex);
   const isExcluded = (name) => excludeRes.some((re) => re.test(String(name).toLowerCase()));
   const found = new Map();
+  const containers = new Set();
 
   const hidden = new Set((cfg.hidden || []).map(normKey));
-  const add = (p, name, pinned = false) => {
+  const add = (p, name, opts = {}) => {
     if (!isDir(p)) return;
     const key = normKey(p);
     if (hidden.has(key)) return;
-    if (found.has(key)) {
-      if (pinned) { const it = found.get(key); it.pinned = true; it.name = name; }
+    const cur = found.get(key);
+    if (cur) {
+      if (opts.pinned) { cur.pinned = true; cur.name = name; }
+      if (opts.root) cur.root = true;
+      if (opts.aiConfig) cur.aiConfig = true;
+      for (const a of opts.agents || []) cur.agents.add(a);
       return;
     }
     const sess = sessions.get(key);
     let folderMtime = 0;
     try { folderMtime = fs.statSync(p).mtimeMs / 1000; } catch { /* keep 0 */ }
-    found.set(key, { name, path: String(p), pinned, last_session: sess ? sess[1] : null, activity: sess ? sess[1] : folderMtime });
+    found.set(key, {
+      name,
+      path: String(p),
+      pinned: Boolean(opts.pinned),
+      last_session: sess ? sess.time : null,
+      activity: sess ? sess.time : folderMtime,
+      root: Boolean(opts.root),
+      aiConfig: Boolean(opts.aiConfig),
+      group: opts.group || null,
+      agents: new Set([...(opts.agents || []), ...(sess ? sess.agents : [])]),
+    });
   };
 
-  for (const item of cfg.pinned || []) add(item.path, item.name || path.basename(item.path), true);
+  for (const item of cfg.pinned || []) add(item.path, item.name || path.basename(item.path), { pinned: true, root: true });
 
   const scanRoots = [...(cfg.scan_roots || [])];
   if (cfg.new_projects_path) scanRoots.push(cfg.new_projects_path);
   for (const root of scanRoots) {
     let kids = [];
     try { kids = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
-    for (const k of kids) { if (k.isDirectory() && !isExcluded(k.name)) add(path.join(root, k.name), k.name); }
+    for (const k of kids) {
+      if (!k.isDirectory() || k.name.startsWith('.') || SKIP_DIRS.has(k.name.toLowerCase()) || isExcluded(k.name)) continue;
+      const full = path.join(root, k.name);
+      const info = dirInfo(full);
+      // A folder with no project marker that only groups subfolders (e.g. EDO, EDW) is not a project itself: list its subfolders instead.
+      const subs = info.root ? [] : childDirs(full, isExcluded);
+      if (subs.length) {
+        containers.add(normKey(full));
+        for (const s of subs) add(s, path.basename(s), { root: true, aiConfig: dirInfo(s).aiConfig, group: full });
+      } else add(full, k.name, { root: true, aiConfig: info.aiConfig });
+    }
   }
 
-  for (const p of autoScan(cfg, excludeRes)) add(p, path.basename(p));
+  for (const hit of autoScan(cfg, excludeRes)) add(hit.path, path.basename(hit.path), { root: true, aiConfig: hit.aiConfig });
 
-  for (const [key, [cwd]] of sessions) {
-    if (isExcluded(path.basename(cwd))) continue;
-    add(cwd, key === normKey(HOME) ? 'Home' : path.basename(cwd));
+  for (const [key, hit] of sessions) {
+    if (containers.has(key) || isExcluded(path.basename(hit.cwd))) continue;
+    add(hit.cwd, key === normKey(HOME) ? 'Home' : path.basename(hit.cwd), { agents: hit.agents });
+  }
+
+  // Anything that did not come from a marker/pin/scan root is a root only when it
+  // is not nested inside another listed project (e.g. an agent's cwd subfolder).
+  for (const item of found.values()) {
+    if (!item.root && !hasListedAncestor(item.path, found)) item.root = true;
   }
 
   const order = new Map((cfg.order || []).map((p, i) => [normKey(p), i]));
   const rank = (x) => (order.has(normKey(x.path)) ? order.get(normKey(x.path)) : order.size);
-  return [...found.values()].sort((a, b) => (Number(!a.pinned) - Number(!b.pinned)) || (rank(a) - rank(b)) || (b.activity - a.activity));
+  const list = [...found.values()].map((x) => ({
+    name: x.name,
+    path: x.path,
+    pinned: x.pinned,
+    last_session: x.last_session,
+    activity: x.activity,
+    root: x.root,
+    nested: !x.root,
+    ai: x.agents.size > 0,
+    aiConfig: x.aiConfig,
+    group: x.pinned ? null : x.group,
+    groupName: x.pinned || !x.group ? null : path.basename(x.group),
+    agents: [...x.agents],
+  }));
+  return list.sort((a, b) => (Number(!a.pinned) - Number(!b.pinned)) || (rank(a) - rank(b)) || (b.activity - a.activity));
 }
 
 ipcMain.handle('projects:list', () => {
@@ -520,6 +671,7 @@ const EL_MAIN = {
   'Pin to top': 'Καρφίτσωμα (πάνω-πάνω)',
   'Open folder': 'Άνοιγμα φακέλου',
   'Copy path': 'Αντιγραφή διαδρομής',
+  'Rename...': 'Μετονομασία...',
   'Reset order (recent first)': 'Επαναφορά σειράς (πρόσφατα πρώτα)',
   'No previous session - starting a new one': 'Δεν υπάρχει προηγούμενη συνεδρία - ξεκινάει νέα',
 };
@@ -534,15 +686,21 @@ Object.assign(EL_MAIN, {
   'This folder cannot be deleted from here.': 'Αυτός ο φάκελος δεν μπορεί να διαγραφεί από εδώ.',
   'Project is not in the list.': 'Το project δεν υπάρχει στη λίστα.',
   'Could not move the folder to the Recycle Bin: {error}': 'Δεν ήταν δυνατή η μεταφορά του φακέλου στον Κάδο Ανακύκλωσης: {error}',
+  'Enter a name.': 'Βάλε όνομα.',
+  'Invalid folder name (not allowed: \\ / : * ? " < > | or a trailing dot/space).': 'Μη έγκυρο όνομα φακέλου (δεν επιτρέπονται: \\ / : * ? " < > | ή τελεία/κενό στο τέλος).',
+  'This folder cannot be renamed from here.': 'Αυτός ο φάκελος δεν μπορεί να μετονομαστεί από εδώ.',
+  'A folder with this name already exists.': 'Υπάρχει ήδη φάκελος με αυτό το όνομα.',
+  "Close this project's terminal first, then rename it.": 'Κλείσε πρώτα το terminal αυτού του project και μετά μετονόμασέ το.',
+  'Could not rename the folder: {error}': 'Δεν ήταν δυνατή η μετονομασία του φακέλου: {error}',
 });
 const tr = (lang, en) => (lang === 'el' && EL_MAIN[en]) || en;
 const tf = (lang, en, vars = {}) => tr(lang, en).replace(/\{(\w+)\}/g, (m, k) => (k in vars ? vars[k] : m));
 
-function spawnPty(id, kind, cwd, resume, cols, rows, lang) {
-  const claude = findClaude();
+function spawnPty(id, kind, cwd, resume, cols, rows, lang, agent = 'claude') {
+  const exe = agent === 'opencode' ? findOpencode() : findClaude();
   const args = resume ? ['--continue'] : [];
-  let file = claude || 'cmd.exe';
-  let fileArgs = claude ? args : ['/c', 'claude', ...args];
+  let file = exe || 'cmd.exe';
+  let fileArgs = exe ? args : ['/c', agent === 'opencode' ? 'opencode' : 'claude', ...args];
   if (kind === 'auth') {
     file = 'cmd.exe';
     fileArgs = process.env.HUB_AUTH_DRYRUN ? ['/c', 'gcloud', 'version'] : ['/c', 'gcloud', 'auth', 'application-default', 'login'];
@@ -564,12 +722,14 @@ function spawnPty(id, kind, cwd, resume, cols, rows, lang) {
     if (win) win.webContents.send('pty:data', id, d);
   });
   p.onExit((e) => {
+    // A deliberate kill (e.g. restarting the tab to switch agents) should not surface an "exited" notice.
+    if (killedPtys.delete(id)) return;
     const current = ptys.get(id) === p;
     const noConversation = /No conversation found/i.test(tail);
     if (current && kind !== 'auth' && resume && e.exitCode !== 0 && (noConversation || Date.now() - startedAt < 5000)) {
       ptys.delete(id);
       if (win) win.webContents.send('pty:data', id, `\r\n\x1b[33m[${tr(lang, 'No previous session - starting a new one')}]\x1b[0m\r\n`);
-      try { spawnPty(id, kind, cwd, false, p.cols, p.rows, lang); return; } catch { /* report the exit below */ }
+      try { spawnPty(id, kind, cwd, false, p.cols, p.rows, lang, agent); return; } catch { /* report the exit below */ }
     }
     if (current) { ptys.delete(id); stopWatch(id); }
     if (win) win.webContents.send('pty:exit', id, e.exitCode);
@@ -580,16 +740,25 @@ function onPath(cmd) {
   try { execFileSync('where', [cmd], { stdio: 'ignore', windowsHide: true }); return true; } catch { return false; }
 }
 
-ipcMain.handle('pty:spawn', (_e, { id, kind, cwd, resume, cols, rows, lang }) => {
+ipcMain.handle('pty:spawn', (_e, { id, kind, cwd, resume, cols, rows, lang, agent: rawAgent }) => {
   if (ptys.has(id)) return { ok: true };
+  const agent = rawAgent === 'opencode' ? 'opencode' : 'claude';
   if (kind === 'auth' && !process.env.HUB_AUTH_DRYRUN && !onPath('gcloud')) {
     return { ok: false, error: 'Google Cloud CLI (gcloud) was not found. The Auth button is only needed if you use Claude through Google Vertex AI. If you use a Claude subscription or an API key, run "claude" and log in there instead. Otherwise install gcloud: https://cloud.google.com/sdk/docs/install' };
   }
-  if (kind !== 'auth' && !findClaude() && !onPath('claude')) {
-    return { ok: false, error: 'Claude Code was not found on this computer. Install it from https://claude.com/claude-code (or run: npm install -g @anthropic-ai/claude-code), then reopen this tab. If you have just installed it, restart Claude Hub so it picks up the new PATH.' };
+  if (kind !== 'auth') {
+    const available = agent === 'opencode' ? Boolean(findOpencode() || onPath('opencode')) : Boolean(findClaude() || onPath('claude'));
+    if (!available) {
+      return {
+        ok: false,
+        error: agent === 'opencode'
+          ? 'opencode was not found on this computer. Install it from https://opencode.ai (or run: npm install -g opencode-ai), then reopen this tab. If you have just installed it, restart Agent Hub so it picks up the new PATH.'
+          : 'Claude Code was not found on this computer. Install it from https://claude.com/claude-code (or run: npm install -g @anthropic-ai/claude-code), then reopen this tab. If you have just installed it, restart Agent Hub so it picks up the new PATH.',
+      };
+    }
   }
   try {
-    spawnPty(id, kind, cwd, resume, cols, rows, lang);
+    spawnPty(id, kind, cwd, resume, cols, rows, lang, agent);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -606,7 +775,7 @@ ipcMain.on('pty:resize', (_e, id, cols, rows) => {
 ipcMain.on('pty:kill', (_e, id) => {
   const p = ptys.get(id);
   stopWatch(id);
-  if (p) { ptys.delete(id); try { p.kill(); } catch { /* already gone */ } }
+  if (p) { killedPtys.add(id); ptys.delete(id); try { p.kill(); } catch { /* already gone */ } }
 });
 
 ipcMain.handle('file:preview', (_e, p) => {
@@ -631,6 +800,13 @@ ipcMain.handle('file:save', async (e, p) => {
   return { saved: res.filePath };
 });
 
+ipcMain.handle('url:open', (_e, raw) => {
+  let u;
+  try { u = new URL(String(raw)); } catch { return false; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  shell.openExternal(u.href);
+  return true;
+});
 ipcMain.handle('file:open', (_e, p) => (isKnownFile(p) ? shell.openPath(p) : ''));
 ipcMain.on('file:reveal', (_e, p) => { if (isKnownFile(p)) shell.showItemInFolder(p); });
 ipcMain.on('file:drag', (e, p) => { if (isKnownFile(p)) e.sender.startDrag({ file: p, icon: dragIcon }); });
@@ -671,6 +847,7 @@ ipcMain.on('project:menu', (e, { path: projectPath, pinned, lang }) => {
     { type: 'separator' },
     { label: tr(lang, 'Open folder'), enabled: isDir, click: () => shell.openPath(p) },
     { label: tr(lang, 'Copy path'), click: () => clipboard.writeText(p) },
+    { label: tr(lang, 'Rename...'), enabled: isDir, click: act('rename') },
     { type: 'separator' },
     { label: tr(lang, 'Reset order (recent first)'), click: act('resetOrder') },
     { type: 'separator' },
@@ -737,6 +914,35 @@ ipcMain.handle('projects:delete', async (e, projectPath, lang) => {
     try { writeConfig(cfg); } catch { /* the folder is gone anyway; the list simply skips missing folders */ }
   }
   return { ok: true };
+});
+
+// Rename = rename the folder on disk and keep config references in sync.
+ipcMain.handle('projects:rename', (_e, projectPath, rawName, lang) => {
+  const p = String(projectPath);
+  const T = (en, vars) => tf(lang, en, vars);
+  const name = String(rawName || '').trim();
+  if (!name) return { ok: false, error: T('Enter a name.') };
+  if (name.length > 100 || /[<>:"/\\|?*\u0000-\u001f]/.test(name) || /[. ]$/.test(name) || RESERVED.test(name)) {
+    return { ok: false, error: T('Invalid folder name (not allowed: \\ / : * ? " < > | or a trailing dot/space).') };
+  }
+  if (!isDir(p) || isShallowDir(p)) return { ok: false, error: T('This folder cannot be renamed from here.') };
+  if (!buildProjects().some((x) => sameDir(x.path, p))) return { ok: false, error: T('Project is not in the list.') };
+  const target = path.join(path.dirname(p), name);
+  if (target === p) return { ok: true, path: p, name };
+  if (!sameDir(target, p) && fs.existsSync(target)) return { ok: false, error: T('A folder with this name already exists.') };
+  for (const cwd of ptyCwd.values()) {
+    if (sameDir(cwd, p)) return { ok: false, error: T("Close this project's terminal first, then rename it.") };
+  }
+  try { fs.renameSync(p, target); } catch (err) { return { ok: false, error: T('Could not rename the folder: {error}', { error: err.message }) }; }
+  const r = readConfigStrict();
+  if (r.ok) {
+    const cfg = r.cfg;
+    cfg.pinned = (cfg.pinned || []).map((x) => (sameDir(x.path, p) ? { ...x, name, path: target } : x));
+    if (cfg.order) cfg.order = cfg.order.map((x) => (sameDir(x, p) ? target : x));
+    if (cfg.hidden) cfg.hidden = cfg.hidden.map((x) => (sameDir(x, p) ? target : x));
+    try { writeConfig(cfg); } catch { /* the folder is renamed; the list picks it up from disk */ }
+  }
+  return { ok: true, path: target, name };
 });
 
 const sameDir = (a, b) => path.normalize(String(a)).toLowerCase() === path.normalize(String(b)).toLowerCase();
@@ -863,6 +1069,164 @@ ipcMain.handle('claude:set', (_e, patch) => {
   }
 });
 
+const OPENCODE_DIR = path.join(HOME, '.config', 'opencode');
+const OPENCODE_STATE_FILE = path.join(HOME, '.local', 'state', 'opencode', 'model.json');
+const OPENCODE_AUTH_FILE = path.join(HOME, '.local', 'share', 'opencode', 'auth.json');
+const OPENCODE_PERM_PRESETS = {
+  ask: { edit: 'ask', bash: 'ask' },
+  deny: { edit: 'deny', bash: 'deny' },
+};
+
+function opencodeConfigFile() {
+  for (const name of ['opencode.jsonc', 'opencode.json']) {
+    const file = path.join(OPENCODE_DIR, name);
+    if (fs.existsSync(file)) return file;
+  }
+  return path.join(OPENCODE_DIR, 'opencode.json');
+}
+
+function stripJsonComments(text) {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    const d = text[i + 1];
+    if (c === '"') {
+      out += c;
+      for (i++; i < text.length; i++) {
+        out += text[i];
+        if (text[i] === '\\') { out += text[i + 1] || ''; i++; continue; }
+        if (text[i] === '"') break;
+      }
+      continue;
+    }
+    if (c === '/' && d === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      if (i < text.length) out += '\n';
+      continue;
+    }
+    if (c === '/' && d === '*') {
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++;
+      i++;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+function stripTrailingCommas(text) {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      out += c;
+      for (i++; i < text.length; i++) {
+        out += text[i];
+        if (text[i] === '\\') { out += text[i + 1] || ''; i++; continue; }
+        if (text[i] === '"') break;
+      }
+      continue;
+    }
+    if (c === ',') {
+      let j = i + 1;
+      while (j < text.length && /\s/.test(text[j])) j++;
+      if (text[j] === '}' || text[j] === ']') continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+function parseJsonc(text) {
+  return JSON.parse(stripTrailingCommas(stripJsonComments(text)));
+}
+
+function readOpencodeConfig(file) {
+  if (!fs.existsSync(file)) return { ok: true, data: {}, exists: false };
+  try { return { ok: true, data: parseJsonc(fs.readFileSync(file, 'utf8')), exists: true }; } catch (e) { return { ok: false, error: e.message }; }
+}
+
+function readOpencodeCurrentModel() {
+  const r = readJsonFile(OPENCODE_STATE_FILE);
+  if (!r.ok) return '';
+  const recent = Array.isArray(r.data && r.data.recent) ? r.data.recent : [];
+  const m = recent[0];
+  return m && m.providerID && m.modelID ? `${m.providerID}/${m.modelID}` : '';
+}
+
+function classifyOpencodePermission(perm) {
+  if (perm === undefined || perm === null) return 'default';
+  if (perm === 'allow' || perm === 'ask' || perm === 'deny') return perm;
+  if (typeof perm === 'object' && !Array.isArray(perm)) {
+    for (const mode of ['ask', 'deny']) {
+      const preset = OPENCODE_PERM_PRESETS[mode];
+      const keys = Object.keys(preset);
+      if (keys.length === Object.keys(perm).length && keys.every((k) => perm[k] === preset[k])) return mode;
+    }
+  }
+  return 'custom';
+}
+
+ipcMain.handle('opencode:get', () => {
+  const file = opencodeConfigFile();
+  const r = readOpencodeConfig(file);
+  if (!r.ok) return { error: `opencode config is not valid JSON: ${r.error}`, path: file };
+  const auth = readJsonFile(OPENCODE_AUTH_FILE);
+  if (!auth.ok) return { error: `opencode auth is not valid JSON: ${auth.error}`, path: OPENCODE_AUTH_FILE };
+  const s = r.data || {};
+  const deepseek = auth.data && auth.data.deepseek;
+  return {
+    path: file,
+    model: typeof s.model === 'string' ? s.model : '',
+    currentModel: readOpencodeCurrentModel(),
+    permMode: classifyOpencodePermission(s.permission),
+    deepseekKey: deepseek && typeof deepseek.key === 'string' ? deepseek.key : '',
+  };
+});
+
+ipcMain.handle('opencode:set', (_e, patch) => {
+  try {
+    const file = opencodeConfigFile();
+    const r = readOpencodeConfig(file);
+    if (!r.ok) throw new Error(`opencode config is not valid JSON: ${r.error}`);
+    let s = r.data || {};
+    const model = String(patch.model || '').trim();
+    if (!r.exists && patch.permMode === 'default' && !model && patch.deepseekKey === undefined) return { ok: true };
+    switch (patch.permMode) {
+      case 'default': delete s.permission; break;
+      case 'allow': s.permission = 'allow'; break;
+      case 'ask': s.permission = { ...OPENCODE_PERM_PRESETS.ask }; break;
+      case 'deny': s.permission = { ...OPENCODE_PERM_PRESETS.deny }; break;
+      case 'custom': break;
+      default: throw new Error('Invalid permission mode.');
+    }
+    if (model) s.model = model; else delete s.model;
+    if (!s.$schema) s = { $schema: 'https://opencode.ai/config.json', ...s };
+
+    const auth = readJsonFile(OPENCODE_AUTH_FILE);
+    if (!auth.ok) throw new Error(`opencode auth is not valid JSON: ${auth.error}`);
+    let authData = auth.data || {};
+    if (patch.deepseekKey !== undefined) {
+      const key = String(patch.deepseekKey || '').trim();
+      if (/[\r\n]/.test(key)) throw new Error('Invalid DeepSeek API key.');
+      if (key) authData.deepseek = { ...(authData.deepseek || {}), type: 'api', key };
+      else delete authData.deepseek;
+    }
+
+    if (patch.dryRun) return { ok: true };
+    if (r.exists) fs.copyFileSync(file, `${file}.hub-backup`);
+    writeJsonAtomic(file, s);
+    if (patch.deepseekKey !== undefined) {
+      if (auth.exists) fs.copyFileSync(OPENCODE_AUTH_FILE, `${OPENCODE_AUTH_FILE}.hub-backup`);
+      writeJsonAtomic(OPENCODE_AUTH_FILE, authData);
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 function describeMcp(name, v, scope, where) {
   const type = v.type || (v.url ? 'http' : 'stdio');
   return { name, scope, where, type, target: v.url || [v.command, ...(v.args || [])].filter(Boolean).join(' ') };
@@ -963,17 +1327,29 @@ ipcMain.handle('mcp:remove', (_e, o) => new Promise((resolve) => {
 
 ipcMain.handle('settings:get', () => {
   const cfg = readConfig();
-  return { newProjectsPath: cfg.new_projects_path || defaultNewPath(), isDefault: !cfg.new_projects_path };
+  return {
+    newProjectsPath: cfg.new_projects_path || defaultNewPath(),
+    isDefault: !cfg.new_projects_path,
+    scanRoots: (Array.isArray(cfg.scan_roots) ? cfg.scan_roots : []).filter((p) => typeof p === 'string'),
+  };
 });
 
-ipcMain.handle('settings:set', (_e, newPath, dryRun) => {
+ipcMain.handle('settings:set', (_e, newPath, scanRoots, dryRun) => {
   const p = String(newPath || '').trim();
   if (!p || !path.isAbsolute(p)) return { ok: false, error: 'Enter a full path, e.g. C:/Users/.../Projects' };
+  const roots = [];
+  for (const raw of Array.isArray(scanRoots) ? scanRoots : []) {
+    const r = String(raw || '').trim();
+    if (!r) continue;
+    if (!path.isAbsolute(r)) return { ok: false, error: `Enter a full path: ${r}` };
+    roots.push(path.normalize(r));
+  }
   const r = readConfigStrict();
   if (!r.ok) return { ok: false, error: r.error };
   if (dryRun) return { ok: true };
   const cfg = r.cfg;
   cfg.new_projects_path = path.normalize(p);
+  if (roots.length) cfg.scan_roots = roots; else delete cfg.scan_roots;
   try { writeConfig(cfg); } catch (err) { return { ok: false, error: err.message }; }
   return { ok: true };
 });
@@ -986,13 +1362,40 @@ ipcMain.handle('dialog:folder', async (e, defaultPath) => {
   return res.canceled || !res.filePaths.length ? null : res.filePaths[0];
 });
 
-ipcMain.handle('project:create', (_e, rawName) => {
+ipcMain.handle('project:destinations', () => {
+  const cfg = readConfig();
+  const excludeRes = (cfg.exclude || []).map(globToRegex);
+  const isExcluded = (n) => excludeRes.some((re) => re.test(String(n).toLowerCase()));
+  const out = [];
+  const seen = new Set();
+  const push = (p, label, force) => {
+    const k = normKey(p);
+    if (seen.has(k) || (!force && !isDir(p))) return;
+    seen.add(k);
+    out.push({ path: p, label });
+  };
+  const base = newProjectsBase();
+  push(base, path.basename(base) || base, true);
+  for (const r of [base, ...(cfg.scan_roots || []).filter((x) => typeof x === 'string')]) {
+    push(r, path.basename(r) || r);
+    for (const c of childDirs(r, isExcluded)) {
+      if (!dirInfo(c).root && childDirs(c, isExcluded).length) push(c, `${path.basename(r)} / ${path.basename(c)}`);
+    }
+  }
+  return out;
+});
+
+ipcMain.handle('project:create', (_e, rawName, baseDir) => {
   const name = String(rawName || '').trim();
   if (!name) return { ok: false, error: 'Enter a name.' };
   if (name.length > 100 || /[<>:"/\\|?*\u0000-\u001f]/.test(name) || /[. ]$/.test(name) || RESERVED.test(name)) {
     return { ok: false, error: 'Invalid folder name (not allowed: \\ / : * ? " < > | or a trailing dot/space).' };
   }
-  const base = newProjectsBase();
+  let base = newProjectsBase();
+  if (baseDir) {
+    if (!path.isAbsolute(String(baseDir)) || !isDir(baseDir)) return { ok: false, error: 'Choose an existing folder.' };
+    base = path.normalize(String(baseDir));
+  }
   const target = path.join(base, name);
   if (path.relative(base, target).startsWith('..')) return { ok: false, error: 'Invalid name.' };
   if (fs.existsSync(target)) return { ok: false, error: 'A folder with this name already exists.' };
@@ -1001,7 +1404,7 @@ ipcMain.handle('project:create', (_e, rawName) => {
 });
 
 if (process.argv.includes('--selftest')) {
-  const testProfile = path.join(os.tmpdir(), 'claude-hub-selftest');
+  const testProfile = path.join(os.tmpdir(), 'agent-hub-selftest');
   if (!process.env.HUB_SELFTEST_RESTORE) { try { fs.rmSync(testProfile, { recursive: true, force: true }); } catch { /* stale profile in use */ } }
   app.setPath('userData', testProfile);
 }

@@ -47,6 +47,8 @@ function renderList() {
     return shown;
   }
   const lastPinned = q ? -1 : shown.reduce((n, p, i) => (p.pinned ? i : n), -1);
+  const collapsed = collapsedGroups();
+  const groupBody = new Map();
   shown.forEach((p, i) => {
     const key = keyOf(p);
     const li = el('li');
@@ -57,7 +59,22 @@ function renderList() {
     li.title = p.path;
     li.appendChild(el('span', 'dot'));
     const txt = el('div', 'txt');
-    txt.appendChild(el('div', 'name', p.name));
+    const nameRow = el('div', 'name');
+    nameRow.appendChild(el('span', 'label', p.name));
+    const agentNames = { claude: 'Claude Code', opencode: 'opencode' };
+    if (p.ai) {
+      const tag = el('span', 'tag ai', 'AI');
+      tag.title = t('Used by {agents}', { agents: (p.agents || []).map((a) => agentNames[a] || a).join(', ') });
+      nameRow.appendChild(tag);
+    } else if (p.aiConfig) {
+      const tag = el('span', 'tag ai cfg', 'AI cfg');
+      tag.title = t('Has AI agent config files');
+      nameRow.appendChild(tag);
+    }
+    const rootTag = el('span', p.nested ? 'tag nested' : 'tag root', p.nested ? t('nested') : t('root'));
+    rootTag.title = p.nested ? t('Nested folder inside another project') : t('Project root');
+    nameRow.appendChild(rootTag);
+    txt.appendChild(nameRow);
     const when = ago(p.last_session);
     txt.appendChild(el('div', 'sub', when ? `${when}  •  ${p.path}` : p.path));
     li.appendChild(txt);
@@ -69,9 +86,38 @@ function renderList() {
     li.addEventListener('click', () => openProject(p));
     li.addEventListener('contextmenu', (e) => { e.preventDefault(); window.hub.projectMenu(p.path, p.pinned, lang()); });
     if (!q) setupRowDrag(li, p);
+    if (!p.group) { listEl.appendChild(li); return; }
+    let body = groupBody.get(p.group);
+    if (!body) {
+      const open = q || !collapsed.has(p.group);
+      const head = el('li', 'grp');
+      head.appendChild(el('span', 'chev', open ? '▾' : '▸'));
+      head.appendChild(el('span', 'label', p.groupName));
+      const count = el('span', 'count', '0');
+      head.appendChild(count);
+      head.title = p.group;
+      head.addEventListener('click', () => toggleGroup(p.group));
+      listEl.appendChild(head);
+      body = { count, open, n: 0 };
+      groupBody.set(p.group, body);
+    }
+    body.count.textContent = String(++body.n);
+    li.classList.add('in-group');
+    if (!body.open) li.hidden = true;
     listEl.appendChild(li);
   });
   return shown;
+}
+
+function collapsedGroups() {
+  try { return new Set(JSON.parse(localStorage.getItem('collapsedGroups') || '[]')); } catch { return new Set(); }
+}
+
+function toggleGroup(group) {
+  const c = collapsedGroups();
+  if (!c.delete(group)) c.add(group);
+  localStorage.setItem('collapsedGroups', JSON.stringify([...c]));
+  renderList();
 }
 
 async function togglePin(p) {
@@ -98,7 +144,7 @@ function setupRowDrag(li, p) {
   li.addEventListener('dragover', (e) => {
     if (!dragPath || dragPath === p.path) return;
     const dragged = projects.find((x) => x.path === dragPath);
-    if (!dragged || dragged.pinned !== p.pinned) return;
+    if (!dragged || dragged.pinned !== p.pinned || (dragged.group || null) !== (p.group || null)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     const rect = li.getBoundingClientRect();
@@ -136,6 +182,9 @@ window.hub.onProjectAction(async ({ action, path: projectPath }) => {
     const res = await window.hub.setOrder(null);
     if (!res.ok) alert(res.error);
     await loadProjects();
+  } else if (action === 'rename') {
+    const p = projects.find((x) => x.path === projectPath);
+    if (p) showRenameDialog(p.path, p.name);
   } else if (action === 'hide') {
     const res = await window.hub.hideProject(projectPath);
     if (!res.ok) alert(res.error);
@@ -177,7 +226,7 @@ function renderTabs() {
     tab.appendChild(el('span', null, s.project.name));
     if (s.newFiles) {
       const badge = el('span', 'newbadge', String(s.newFiles));
-      badge.title = t('New files from Claude');
+      badge.title = t('New files from agent');
       tab.appendChild(badge);
     }
     const x = el('button', 'x', '×');
@@ -199,6 +248,8 @@ const TERM_THEMES = {
 };
 
 function currentTheme() { return localStorage.getItem('hubTheme') === 'light' ? 'light' : 'dark'; }
+
+function currentAgent() { return localStorage.getItem('hubAgent') === 'opencode' ? 'opencode' : 'claude'; }
 
 function applyTheme() {
   const t = currentTheme();
@@ -264,7 +315,7 @@ function applyTermFont() {
 }
 
 let webglBroken = false;
-const webglEnabled = () => localStorage.getItem('termWebgl') !== '0' && !webglBroken;
+const webglEnabled = () => localStorage.getItem('termWebgl') === '1' && !webglBroken;
 
 function setWebgl(s, on) {
   if (on && !s.webgl) {
@@ -313,6 +364,209 @@ function activate(key) {
   }
 }
 
+// ---------- command-line selection (Ctrl+A, Shift+Home / Shift+End) ----------
+// The agent draws its input as a prompt row ("> text", optionally inside a box) between border rules.
+// These helpers find that block from the terminal buffer so a selection covers only what was typed.
+const PROMPT_MARK = /^[>❯›](\s|$)/;
+const BORDER_ROW = /^[\s╭╮╰╯┌┐└┘├┤]*[─━]{3,}[\s╭╮╰╯┌┐└┘├┤]*$/;
+
+function inputRow(term, y) {
+  const line = term.buffer.active.getLine(y);
+  if (!line) return null;
+  const cells = [];
+  for (let x = 0; x < term.cols; x++) {
+    const c = line.getCell(x);
+    cells.push(!c || c.getWidth() === 0 ? '' : (c.getChars() || ' '));
+  }
+  if (BORDER_ROW.test(cells.join(''))) return { y, cells, border: true, lb: -1, rb: -1 };
+  const sp = (x) => cells[x] === ' ';
+  const bar = (x) => cells[x] === '│' || cells[x] === '┃';
+  let a = 0;
+  let b = cells.length;
+  while (b > a && sp(b - 1)) b--;
+  let rb = -1;
+  if (b > a && bar(b - 1)) { rb = b - 1; b--; while (b > a && sp(b - 1)) b--; }
+  while (a < b && sp(a)) a++;
+  let lb = -1;
+  if (a < b && bar(a)) { lb = a; a++; while (a < b && sp(a)) a++; }
+  const prompt = PROMPT_MARK.test(cells.slice(a, b).join('').slice(0, 2));
+  if (prompt) { a++; while (a < b && sp(a)) a++; }
+  return { y, cells, border: false, a, b, lb, rb, prompt, blank: b <= a && !prompt };
+}
+
+function findInputBlock(term) {
+  const buf = term.buffer.active;
+  const cy = buf.baseY + buf.cursorY;
+  const cur = inputRow(term, cy);
+  if (!cur || cur.border) return null;
+  if (cur.blank && cur.lb < 0) return null;
+  const rows = [cur];
+  // Inside a bordered box (opencode): grow along rows that share the same left bar column.
+  if (cur.lb >= 0) {
+    for (let y = cy - 1; y >= Math.max(0, cy - 25); y--) {
+      const r = inputRow(term, y);
+      if (!r || r.border || r.blank || r.lb !== cur.lb) break;
+      rows.unshift(r);
+      if (r.prompt) break;
+    }
+    for (let y = cy + 1; y < buf.length; y++) {
+      const r = inputRow(term, y);
+      if (!r || r.border || r.blank || r.lb !== cur.lb || r.prompt) break;
+      rows.push(r);
+    }
+  }
+  return { rows, cy };
+}
+
+const rowText = (r, from, to) => r.cells.slice(from, to).join('').trimEnd();
+
+function selectCommandLine(s) {
+  s.kbSel = null;
+  const blk = findInputBlock(s.term);
+  if (!blk) return false;
+  const first = blk.rows[0];
+  const last = blk.rows[blk.rows.length - 1];
+  const length = (last.y - first.y) * s.term.cols + (last.b - first.a);
+  if (length <= 0) { s.term.clearSelection(); s.cleanSel = null; return true; }
+  s.term.select(first.a, first.y, length);
+  s.cleanSel = { key: s.term.getSelection(), text: blk.rows.map((r) => rowText(r, r.a, r.b)).join('\n') };
+  if (first === last) s.cleanSel.del = { row: first, from: first.a, to: first.b, sig: rowText(first, first.a, first.b), ...caretOf(s.term) };
+  return true;
+}
+
+function selectLineEdge(s, toStart) {
+  s.kbSel = null;
+  const blk = findInputBlock(s.term);
+  if (!blk) return false;
+  const onCursorRow = blk.rows.find((r) => r.y === blk.cy);
+  const row = onCursorRow || blk.rows[blk.rows.length - 1];
+  const caret = onCursorRow ? Math.min(Math.max(s.term.buffer.active.cursorX, row.a), row.b) : row.b;
+  const from = toStart ? row.a : caret;
+  const to = toStart ? caret : row.b;
+  if (to <= from) return true;
+  s.term.select(from, row.y, to - from);
+  s.cleanSel = { key: s.term.getSelection(), text: rowText(row, from, to) };
+  if (onCursorRow) s.cleanSel.del = { row, from, to, sig: rowText(row, row.a, row.b), ...caretOf(s.term) };
+  return true;
+}
+
+// Clean text for an arbitrary cell range (used by the Ctrl+Shift arrow selection).
+function cleanRangeText(term, startRow, startCol, length) {
+  if (length <= 0) return '';
+  const cols = term.cols;
+  const endAbs = startRow * cols + startCol + length;
+  const endRow = Math.floor((endAbs - 1) / cols);
+  const endCol = ((endAbs - 1) % cols) + 1;
+  const parts = [];
+  for (let y = startRow; y <= endRow; y++) {
+    const r = inputRow(term, y);
+    if (!r || r.border) continue;
+    const from = y === startRow ? Math.max(startCol, r.a) : r.a;
+    const to = y === endRow ? Math.min(endCol, r.b) : r.b;
+    if (to > from) parts.push(rowText(r, from, to));
+  }
+  return parts.join('\n');
+}
+
+const WORD_CHAR = /[\p{L}\p{N}_]/u;
+
+function moveCaretWord(row, col, dir) {
+  const { a, b, cells } = row;
+  const word = (x) => WORD_CHAR.test(cells[x] || '');
+  let i = Math.min(Math.max(col, a), b);
+  if (dir < 0) {
+    while (i > a && !word(i - 1)) i--;
+    while (i > a && word(i - 1)) i--;
+    return i;
+  }
+  while (i < b && !word(i)) i++;
+  while (i < b && word(i)) i++;
+  return i;
+}
+
+function applyKbSel(s, blk) {
+  const cols = s.term.cols;
+  const { anchor, caret } = s.kbSel;
+  const aAbs = anchor.y * cols + anchor.col;
+  const cAbs = caret.y * cols + caret.col;
+  const startAbs = Math.min(aAbs, cAbs);
+  const len = Math.abs(cAbs - aAbs);
+  if (len <= 0) { s.term.clearSelection(); s.cleanSel = null; return; }
+  const startRow = Math.floor(startAbs / cols);
+  const startCol = startAbs - startRow * cols;
+  s.term.select(startCol, startRow, len);
+  s.cleanSel = { key: s.term.getSelection(), text: cleanRangeText(s.term, startRow, startCol, len) };
+  if (anchor.y === caret.y) {
+    const row = blk.rows.find((r) => r.y === anchor.y);
+    const from = Math.min(anchor.col, caret.col);
+    const to = Math.max(anchor.col, caret.col);
+    if (row && to > from) s.cleanSel.del = { row, from, to, sig: rowText(row, row.a, row.b), ...caretOf(s.term) };
+  }
+}
+
+// Ctrl+Shift+Home/End/Left/Right: select within the command line, extending from an anchor.
+function handleKbSel(s, code) {
+  const blk = findInputBlock(s.term);
+  if (!blk) return false;
+  const cur = blk.rows.find((r) => r.y === blk.cy) || blk.rows[blk.rows.length - 1];
+  const cursorCol = cur.y === blk.cy ? Math.min(Math.max(s.term.buffer.active.cursorX, cur.a), cur.b) : cur.b;
+  const sig = blk.rows.map((r) => `${r.y}:${r.a}:${r.b}:${rowText(r, r.a, r.b)}`).join('|');
+  if (!s.kbSel || s.kbSel.sig !== sig) {
+    s.kbSel = { anchor: { y: cur.y, col: cursorCol }, caret: { y: cur.y, col: cursorCol }, sig };
+  }
+  const sel = s.kbSel;
+  if (code === 'Home') {
+    sel.caret = { y: blk.rows[0].y, col: blk.rows[0].a };
+  } else if (code === 'End') {
+    const last = blk.rows[blk.rows.length - 1];
+    sel.caret = { y: last.y, col: last.b };
+  } else {
+    const idx = blk.rows.findIndex((r) => r.y === sel.caret.y);
+    const row = idx >= 0 ? blk.rows[idx] : cur;
+    const atStart = sel.caret.col <= row.a;
+    const atEnd = sel.caret.col >= row.b;
+    if (code === 'ArrowLeft') {
+      if (atStart && idx > 0) sel.caret = { y: blk.rows[idx - 1].y, col: blk.rows[idx - 1].b };
+      else sel.caret = { y: row.y, col: moveCaretWord(row, sel.caret.col, -1) };
+    } else {
+      if (atEnd && idx >= 0 && idx < blk.rows.length - 1) sel.caret = { y: blk.rows[idx + 1].y, col: blk.rows[idx + 1].a };
+      else sel.caret = { y: row.y, col: moveCaretWord(row, sel.caret.col, 1) };
+    }
+  }
+  applyKbSel(s, blk);
+  return true;
+}
+
+const caretOf = (term) => ({ cx: term.buffer.active.cursorX, cy: term.buffer.active.baseY + term.buffer.active.cursorY });
+const charCount = (cells, from, to) => cells.slice(from, to).filter((c) => c !== '').length;
+
+// Deletes the selected command-line text inside the agent: move the caret to the selection end (Right arrows)
+// and Backspace over it. Only done when the selection is on one row and the row/caret are unchanged since it was made.
+function deleteCleanSelection(s) {
+  const sel = s.cleanSel;
+  if (!s.alive || !sel || !sel.del || !s.term.hasSelection() || s.term.getSelection() !== sel.key) return false;
+  const d = sel.del;
+  const cur = caretOf(s.term);
+  const r = inputRow(s.term, d.row.y);
+  const unchanged = r && !r.border && r.a === d.row.a && r.b === d.row.b && rowText(r, r.a, r.b) === d.sig;
+  if (!unchanged || cur.cx !== d.cx || cur.cy !== d.cy || cur.cy !== d.row.y) { s.cleanSel = null; return false; }
+  const caret = Math.min(Math.max(cur.cx, d.from), d.to);
+  const right = charCount(r.cells, caret, d.to);
+  const back = charCount(r.cells, d.from, d.to);
+  if (!back) return false;
+  window.hub.write(s.id, '\x1b[C'.repeat(right) + '\x7f'.repeat(back));
+  s.term.clearSelection();
+  s.cleanSel = null;
+  s.typed = true;
+  return true;
+}
+
+// Selected text, without the box borders / prompt marker when the selection came from the helpers above.
+function selectionText(s) {
+  const sel = s.term.getSelection();
+  return s.cleanSel && s.cleanSel.key === sel ? s.cleanSel.text : sel;
+}
+
 function createSession(project) {
   const id = `s${nextId++}`;
   const container = el('div', 'term');
@@ -330,9 +584,10 @@ function createSession(project) {
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
+  term.loadAddon(new WebLinksAddon.WebLinksAddon((_ev, uri) => window.hub.openExternal(uri)));
   term.open(container);
 
-  const s = { id, key: keyOf(project), project, el: container, term, fit, alive: false, started: false, typed: false };
+  const s = { id, key: keyOf(project), project, el: container, term, fit, alive: false, started: false, typed: false, pendingPastes: [] };
   sessions.set(s.key, s);
   byId.set(id, s);
 
@@ -342,29 +597,70 @@ function createSession(project) {
       return;
     }
     s.typed = true;
+    s.kbSel = null;
+    if (d === '\r') s.pendingPastes = [];
     window.hub.write(id, d);
   });
   term.onResize(({ cols, rows }) => { if (s.alive) window.hub.resize(id, cols, rows); });
 
   term.attachCustomKeyEventHandler((ev) => {
+    if (ev.type === 'keydown' && (ev.key === 'Backspace' || ev.key === 'Delete')) {
+      const removed = deleteCleanSelection(s);
+      s.kbSel = null;
+      s.reconcileArmedUntil = Date.now() + 5000;
+      for (const ms of [30, 120, 350, 700, 1200]) setTimeout(() => reconcileTerminalPastes(s), ms);
+      if (removed) ev.preventDefault();
+      return !removed;
+    }
+    // Typing over a selected command-line range replaces it, as in a chat box.
+    if (ev.type === 'keydown' && ev.key.length === 1 && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+      deleteCleanSelection(s);
+      s.kbSel = null;
+    }
+    if (ev.type === 'keydown' && ev.shiftKey && !ev.ctrlKey && !ev.altKey && (ev.code === 'Home' || ev.code === 'End')) {
+      if (selectLineEdge(s, ev.code === 'Home')) { ev.preventDefault(); return false; }
+      return true;
+    }
+    // Ctrl+Shift+Home/End/Left/Right: select the command line word-by-word / to its edges.
+    if (ev.type === 'keydown' && ev.ctrlKey && ev.shiftKey && !ev.altKey
+      && (ev.code === 'Home' || ev.code === 'End' || ev.code === 'ArrowLeft' || ev.code === 'ArrowRight')) {
+      if (handleKbSel(s, ev.code)) { ev.preventDefault(); return false; }
+    }
     if (ev.type !== 'keydown' || !ev.ctrlKey) return true;
     if (ev.code === 'Equal' || ev.code === 'NumpadAdd') { ev.preventDefault(); zoomTerm(1); return false; }
     if (ev.code === 'Minus' || ev.code === 'NumpadSubtract') { ev.preventDefault(); zoomTerm(-1); return false; }
     if (ev.code === 'Digit0' || ev.code === 'Numpad0') { ev.preventDefault(); zoomTerm(0); return false; }
     // ev.code is the physical key, so this works with any layout (e.g. Greek, where Ctrl+V gives a non-Latin key).
+    if (ev.code === 'KeyA' && !ev.altKey && !ev.shiftKey) {
+      ev.preventDefault();
+      // Only ever select the command line: never fall back to the whole screen.
+      if (!selectCommandLine(s)) {
+        const b = term.buffer.active;
+        const y = b.baseY + b.cursorY;
+        term.select(0, y, term.cols);
+        s.cleanSel = null;
+      }
+      return false;
+    }
     const k = ev.code === 'KeyV' ? 'v' : ev.code === 'KeyC' ? 'c' : ev.key.toLowerCase();
     if (k === 'v' && !ev.altKey) {
       // Paste explicitly via the main-process clipboard: the native paste event
       // is unreliable in the Electron terminal. preventDefault stops a double paste.
       ev.preventDefault();
+      deleteCleanSelection(s);
       readClipboardData().then((r) => {
-        if (r.type === 'image') { addItems([{ path: r.path, isImage: true }], false, s.key); insertPaths([r.path], s); }
-        else if (r.type === 'text') term.paste(r.text);
+        if (r.type === 'image') {
+          const item = { path: r.path, isImage: true };
+          const before = captureInputLine(s);
+          addItems([item], false, s.key);
+          insertPaths([r.path], s);
+          trackTerminalPaste(s, item, before);
+        } else if (r.type === 'text') term.paste(r.text);
       });
       return false;
     }
     if (k === 'c' && term.hasSelection()) {
-      window.hub.writeClipboard(term.getSelection());
+      window.hub.writeClipboard(selectionText(s));
       term.clearSelection();
       return false;
     }
@@ -376,7 +672,12 @@ function createSession(project) {
     if (!dt || dt.getData('text/plain') || !dt.files.length) return;
     e.preventDefault();
     e.stopPropagation();
-    filesFromTransfer(dt).then((items) => { addItems(items, false, s.key); insertPaths(items.map((i) => i.path), s); });
+    const before = captureInputLine(s);
+    filesFromTransfer(dt).then((items) => {
+      addItems(items, false, s.key);
+      insertPaths(items.map((i) => i.path), s);
+      for (const it of items) trackTerminalPaste(s, it, before);
+    });
   }, true);
 
   container.addEventListener('wheel', (e) => {
@@ -388,10 +689,15 @@ function createSession(project) {
 
   container.addEventListener('contextmenu', async (e) => {
     e.preventDefault();
-    if (term.hasSelection()) { window.hub.writeClipboard(term.getSelection()); term.clearSelection(); return; }
+    if (term.hasSelection()) { window.hub.writeClipboard(selectionText(s)); term.clearSelection(); return; }
     const r = await readClipboardData();
-    if (r.type === 'image') { addItems([{ path: r.path, isImage: true }], false, s.key); insertPaths([r.path], s); }
-    else if (r.type === 'text') term.paste(r.text);
+    if (r.type === 'image') {
+      const item = { path: r.path, isImage: true };
+      const before = captureInputLine(s);
+      addItems([item], false, s.key);
+      insertPaths([r.path], s);
+      trackTerminalPaste(s, item, before);
+    } else if (r.type === 'text') term.paste(r.text);
   });
 
   return s;
@@ -399,9 +705,11 @@ function createSession(project) {
 
 async function startPty(s) {
   s.fit.fit();
+  const agent = s.project.special === 'auth' ? 'claude' : currentAgent();
+  s.agent = agent;
   const resumeLast = localStorage.getItem('resumeLast') !== '0';
-  const resume = (resumeLast && Boolean(s.project.last_session)) || s.typed;
-  const res = await window.hub.spawn({ id: s.id, kind: s.project.special || 'claude', cwd: s.project.path, resume, cols: s.term.cols, rows: s.term.rows, lang: lang() });
+  const resume = s.typed ? true : resumeLast && (agent === 'opencode' || Boolean(s.project.last_session));
+  const res = await window.hub.spawn({ id: s.id, kind: s.project.special || 'claude', cwd: s.project.path, resume, cols: s.term.cols, rows: s.term.rows, lang: lang(), agent });
   s.started = true;
   if (!res.ok) {
     s.term.write(`\r\n\x1b[31m${t('Failed to start: {error}', { error: res.error })}\x1b[0m\r\n`);
@@ -449,6 +757,21 @@ function closeSession(s) {
   persistTabs();
 }
 
+// Restart every open project terminal so a change of agent takes effect immediately.
+async function restartSessionsForAgent() {
+  for (const s of [...sessions.values()]) {
+    if (s.project.special || !s.alive) continue;
+    window.hub.kill(s.id);
+    s.alive = false;
+    s.started = false;
+    s.pendingPastes = [];
+    s.kbSel = null;
+    s.cleanSel = null;
+    try { s.term.reset(); } catch { /* terminal already disposed */ }
+    await startPty(s);
+  }
+}
+
 let restoring = false;
 
 function persistTabs() {
@@ -468,18 +791,30 @@ async function restoreTabs() {
   restoring = true;
   const find = (p) => projects.find((x) => x.path.toLowerCase() === String(p).toLowerCase())
     || { name: baseName(String(p)), path: String(p), pinned: false, last_session: null };
-  for (const p of saved.tabs) await openProject(find(p));
-  restoring = false;
+  try {
+    for (const p of saved.tabs) {
+      try { await openProject(find(p)); } catch { /* skip a tab that fails to open */ }
+    }
+  } finally { restoring = false; }
   if (saved.active) activate(keyOf(find(saved.active)));
   persistTabs();
 }
 
-window.hub.onData((id, data) => { const s = byId.get(id); if (s) s.term.write(data); });
+window.hub.onData((id, data) => {
+  const s = byId.get(id);
+  if (!s) return;
+  s.term.write(data, () => {
+    if (s.pendingPastes && s.pendingPastes.length && s.reconcileArmedUntil > Date.now()) {
+      clearTimeout(s.reconcileTimer);
+      s.reconcileTimer = setTimeout(() => reconcileTerminalPastes(s), 60);
+    }
+  });
+});
 window.hub.onExit((id, code) => {
   const s = byId.get(id);
   if (!s) return;
   s.alive = false;
-  const what = s.project.special === 'auth' ? t('Login finished') : t('claude exited');
+  const what = s.project.special === 'auth' ? t('Login finished') : t('{agent} exited', { agent: s.agent === 'opencode' ? 'opencode' : 'claude' });
   s.term.write(`\r\n\x1b[33m${t('[{what} (code {code}). Press Enter to restart.]', { what, code })}\x1b[0m\r\n`);
   renderTabs();
 });
@@ -560,6 +895,61 @@ function addItems(items, insert, key = activeKey) {
   if (key !== activeKey) return;
   renderChips();
   if (insert && autoEl.checked) insertPaths(items.map((i) => i.path));
+}
+
+function captureInputLine(s) {
+  const b = s.term.buffer.active;
+  const line = b.getLine(b.baseY + b.cursorY);
+  return line ? line.translateToString(true) : '';
+}
+
+// The characters that appeared on the input line because of the paste. Agents like opencode
+// render a pasted file as e.g. "[image 1]", so we can't assume the raw path stays visible.
+function insertedBetween(before, after) {
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) start++;
+  let endB = before.length;
+  let endA = after.length;
+  while (endB > start && endA > start && before[endB - 1] === after[endA - 1]) { endB--; endA--; }
+  return after.slice(start, endA);
+}
+
+function trackTerminalPaste(s, item, before) {
+  if (!s.pendingPastes) return;
+  const entry = { item, needle: '', createdAt: Date.now(), expires: Date.now() + 60000 };
+  s.pendingPastes.push(entry);
+  const capture = () => {
+    if (!s.pendingPastes.includes(entry)) return;
+    const token = insertedBetween(before, captureInputLine(s)).trim();
+    if (token) entry.needle = token;
+  };
+  for (const ms of [250, 600, 1200]) setTimeout(capture, ms);
+}
+
+// When a pasted attachment (e.g. "[image 1]") is deleted from the input with Backspace/Delete,
+// drop the matching chip from the right panel instead of leaving it behind.
+function reconcileTerminalPastes(s) {
+  const pending = s.pendingPastes;
+  if (!pending || !pending.length) return;
+  const b = s.term.buffer.active;
+  const y = b.baseY + b.cursorY;
+  let text = '';
+  for (let i = Math.max(0, y - 2); i <= Math.min(b.length - 1, y + 1); i++) {
+    const line = b.getLine(i);
+    if (line) text += line.translateToString(true);
+  }
+  const now = Date.now();
+  const gone = [];
+  s.pendingPastes = pending.filter((e) => {
+    if (now > e.expires) return false;
+    if (!e.needle || now - e.createdAt < 1500) return true;
+    if (text.includes(e.needle)) return true;
+    gone.push(e.item);
+    return false;
+  });
+  if (!gone.length) return;
+  inboxByKey.set(s.key, (inboxByKey.get(s.key) || []).filter((i) => !gone.includes(i)));
+  if (s.key === activeKey) renderChips();
 }
 
 function requireProject() {
@@ -666,7 +1056,30 @@ function showImage(src) {
   lightbox.hidden = false;
 }
 
+function syncRightRail() {
+  const both = $('#drop').classList.contains('collapsed') && $('#outputs').classList.contains('collapsed');
+  $('#rightbar').classList.toggle('rail', both);
+  $('#splitter-r').hidden = both;
+}
+
+function applyPaneCollapse() {
+  let saved = [];
+  try { saved = JSON.parse(localStorage.getItem('collapsedPanes') || '[]'); } catch { /* use defaults */ }
+  for (const id of ['drop', 'outputs']) $(`#${id}`).classList.toggle('collapsed', saved.includes(id));
+  syncRightRail();
+}
+for (const btn of document.querySelectorAll('.drop-head .collapse')) {
+  btn.addEventListener('click', () => {
+    $(`#${btn.dataset.target}`).classList.toggle('collapsed');
+    localStorage.setItem('collapsedPanes', JSON.stringify(['drop', 'outputs'].filter((id) => $(`#${id}`).classList.contains('collapsed'))));
+    syncRightRail();
+  });
+}
+applyPaneCollapse();
+
 $('#auth').addEventListener('click', openAuth);
+function applyAuthVisibility() { $('#auth').hidden = currentAgent() !== 'claude'; }
+applyAuthVisibility();
 
 // ---------- files produced by Claude ----------
 const outList = $('#outputs-list');
@@ -767,14 +1180,18 @@ renderOutputs();
 // ---------- dialogs: new project / settings ----------
 const modal = $('#modal');
 const dlgNew = $('#dlg-new');
+const dlgRename = $('#dlg-rename');
 const dlgSet = $('#dlg-settings');
 const newNameEl = $('#new-name');
 const newWhereEl = $('#new-where');
+const renameNameEl = $('#rename-name');
 const setPathEl = $('#set-path');
 let newBase = '';
+let renamePath = '';
 
 function openDialog(dlg, focusEl) {
   dlgNew.hidden = dlg !== dlgNew;
+  dlgRename.hidden = dlg !== dlgRename;
   dlgSet.hidden = dlg !== dlgSet;
   modal.hidden = false;
   focusEl.focus();
@@ -784,6 +1201,7 @@ function openDialog(dlg, focusEl) {
 function closeDialog() {
   modal.hidden = true;
   dlgNew.hidden = true;
+  dlgRename.hidden = true;
   dlgSet.hidden = true;
   const s = sessions.get(activeKey);
   if (s) s.term.focus();
@@ -798,12 +1216,38 @@ function updateWhere() {
   newWhereEl.textContent = name ? `${newBase}\\${name}` : newBase;
 }
 
+const newDestEl = $('#new-dest');
+let newDests = [];
+
+function fillDest(selected) {
+  newDestEl.textContent = '';
+  for (const d of newDests) {
+    const o = el('option', null, d.label);
+    o.value = d.path;
+    o.title = d.path;
+    newDestEl.appendChild(o);
+  }
+  newDestEl.value = selected;
+  if (newDestEl.value !== selected) newDestEl.selectedIndex = 0;
+  newBase = newDestEl.value;
+}
+
+newDestEl.addEventListener('change', () => { newBase = newDestEl.value; updateWhere(); });
+
 async function showNewDialog() {
-  newBase = (await window.hub.getSettings()).newProjectsPath;
+  newDests = await window.hub.projectDestinations();
+  fillDest(localStorage.getItem('newDest') || '');
   newNameEl.value = '';
   $('#new-error').textContent = '';
   updateWhere();
   openDialog(dlgNew, newNameEl);
+}
+
+function showRenameDialog(projectPath, currentName) {
+  renamePath = projectPath;
+  renameNameEl.value = currentName;
+  $('#rename-error').textContent = '';
+  openDialog(dlgRename, renameNameEl);
 }
 
 const setFontEl = $('#set-font');
@@ -831,10 +1275,73 @@ const cl = {
 };
 let claudeState = null;
 
+const OC_MODE_LABELS = {
+  default: t('opencode default (leaves permission unset)'),
+  allow: t('allow everything'),
+  ask: t('ask before edits and commands'),
+  deny: t('deny edits and commands'),
+  custom: t('custom (keeps the permission rules already in the file)'),
+};
+const oc = {
+  path: $('#oc-path'), model: $('#oc-model'), mode: $('#oc-mode'),
+  note: $('#oc-model-note'), list: $('#oc-model-list'),
+  key: $('#oc-deepseek-key'), keyNote: $('#oc-deepseek-note'),
+  savedModel: '', currentModel: '', dirty: false,
+};
+let opencodeState = null;
+
+oc.model.addEventListener('input', () => {
+  oc.dirty = true;
+  oc.note.textContent = '';
+});
+$('#oc-deepseek-clear').addEventListener('click', () => {
+  oc.key.value = '';
+  oc.key.focus();
+});
+oc.key.addEventListener('input', () => {
+  oc.keyNote.textContent = oc.key.value.trim()
+    ? t('DeepSeek will be connected when you save.')
+    : t('Leave empty and save to disconnect DeepSeek.');
+});
+
+function fillOpencode(st) {
+  oc.path.textContent = st.path;
+  oc.savedModel = st.model || '';
+  oc.currentModel = st.currentModel || '';
+  oc.dirty = false;
+  oc.model.value = oc.savedModel || oc.currentModel;
+  oc.key.value = st.deepseekKey || '';
+  oc.keyNote.textContent = st.deepseekKey
+    ? t('DeepSeek is connected (stored in opencode auth.json).')
+    : t('No DeepSeek key set. Paste your key to connect.');
+  for (const o of oc.list.querySelectorAll('option[data-current]')) o.remove();
+  if (oc.currentModel && ![...oc.list.options].some((o) => o.value === oc.currentModel)) {
+    const cur = el('option');
+    cur.value = oc.currentModel;
+    cur.dataset.current = '1';
+    oc.list.prepend(cur);
+  }
+  oc.note.textContent = !oc.savedModel && oc.currentModel
+    ? t('Current opencode model: {model} (saved only if you change it).', { model: oc.currentModel })
+    : '';
+  const modes = ['default', 'allow', 'ask', 'deny'];
+  if (st.permMode === 'custom') modes.push('custom');
+  oc.mode.textContent = '';
+  for (const m of modes) {
+    const opt = el('option', null, OC_MODE_LABELS[m]);
+    opt.value = m;
+    oc.mode.appendChild(opt);
+  }
+  oc.mode.value = st.permMode;
+}
+
+function collectOpencode() {
+  return { model: oc.dirty ? oc.model.value : oc.savedModel, permMode: oc.mode.value, deepseekKey: oc.key.value };
+}
+
 function showSettingsTab(name) {
   for (const b of dlgSet.querySelectorAll('.stab')) b.classList.toggle('active', b.dataset.tab === name);
   for (const pane of dlgSet.querySelectorAll('.spane')) pane.hidden = pane.dataset.pane !== name;
-  if (name === 'mcp') refreshMcp();
 }
 for (const b of dlgSet.querySelectorAll('.stab')) b.addEventListener('click', () => showSettingsTab(b.dataset.tab));
 
@@ -922,82 +1429,57 @@ function collectClaude() {
   };
 }
 
-const activeProjectPath = () => {
-  const s = sessions.get(activeKey);
-  return s && !s.project.special ? s.project.path : '';
-};
+const setRootsEl = $('#set-roots');
 
-async function refreshMcp() {
-  const box = $('#mcp-list');
-  const items = await window.hub.mcpList(activeProjectPath());
-  box.textContent = '';
-  if (!items.length) { box.appendChild(el('div', 'mcpnone', t('No MCP servers.'))); return; }
-  for (const it of items) {
-    const row = el('div', 'mcprow');
-    row.appendChild(el('span', 'mname', it.name));
-    row.appendChild(el('span', 'mscope', it.scope === 'local' ? `local · ${baseName(it.where)}` : it.scope === 'project' ? '.mcp.json' : 'user'));
-    const target = el('span', 'mtarget', `${it.type}: ${it.target}`);
-    target.title = it.target;
-    row.appendChild(target);
-    const rm = el('button', null, t('Delete'));
-    rm.type = 'button';
-    rm.addEventListener('click', async () => {
-      if (!confirm(t('Delete MCP server "{name}" ({scope})?', { name: it.name, scope: it.scope }))) return;
-      const r = await window.hub.mcpRemove({ name: it.name, scope: it.scope, cwd: it.where });
-      $('#set-error').textContent = r.ok ? '' : r.error;
-      refreshMcp();
-    });
-    row.appendChild(rm);
-    box.appendChild(row);
-  }
+function addRootRow(value = '') {
+  const row = el('div', 'rootrow');
+  const inp = el('input');
+  inp.type = 'text';
+  inp.value = value;
+  inp.spellcheck = false;
+  inp.placeholder = 'e.g. C:/Users/me/Code';
+  const browse = el('button', null, t('Browse...'));
+  browse.type = 'button';
+  browse.addEventListener('click', async () => {
+    const picked = await window.hub.chooseFolder(inp.value);
+    if (picked) inp.value = picked;
+  });
+  const rm = el('button', null, '×');
+  rm.type = 'button';
+  rm.addEventListener('click', () => row.remove());
+  row.append(inp, browse, rm);
+  setRootsEl.appendChild(row);
 }
 
-$('#mcp-check').addEventListener('click', async () => {
-  const out = $('#mcp-check-out');
-  out.hidden = false;
-  out.textContent = t('Checking connection...');
-  out.textContent = await window.hub.mcpCheck(activeProjectPath());
-});
-for (const id of ['#mcp-name', '#mcp-target', '#mcp-env']) {
-  $(id).addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); $('#mcp-add-go').click(); }
-  });
+function fillRoots(roots) {
+  setRootsEl.textContent = '';
+  for (const r of roots || []) addRootRow(r);
 }
-$('#mcp-add-toggle').addEventListener('click', () => { $('#mcp-add').hidden = !$('#mcp-add').hidden; });
-$('#mcp-add-cancel').addEventListener('click', () => { $('#mcp-add').hidden = true; });
-$('#mcp-add-go').addEventListener('click', async () => {
-  const scope = $('#mcp-scope').value;
-  const cwd = activeProjectPath();
-  if (scope !== 'user' && !cwd) { $('#set-error').textContent = t('For local/project scope, open a project first.'); return; }
-  const r = await window.hub.mcpAdd({
-    name: $('#mcp-name').value.trim(),
-    transport: $('#mcp-transport').value,
-    scope,
-    target: $('#mcp-target').value,
-    env: $('#mcp-env').value.split(/\s+/).filter(Boolean),
-    cwd,
-  });
-  $('#set-error').textContent = r.ok ? '' : r.error;
-  if (r.ok) {
-    for (const id of ['#mcp-name', '#mcp-target', '#mcp-env']) $(id).value = '';
-    $('#mcp-add').hidden = true;
-    refreshMcp();
-  }
-});
+
+function collectRoots() {
+  return [...setRootsEl.querySelectorAll('.rootrow input')].map((i) => i.value.trim()).filter(Boolean);
+}
+
+$('#set-root-add').addEventListener('click', () => addRootRow());
 
 async function showSettings() {
-  setPathEl.value = (await window.hub.getSettings()).newProjectsPath;
+  const base = await window.hub.getSettings();
+  setPathEl.value = base.newProjectsPath;
+  fillRoots(base.scanRoots);
   const font = termFontSettings();
   setFontEl.value = font.family;
   setSizeEl.value = font.size;
-  $('#set-webgl').checked = localStorage.getItem('termWebgl') !== '0';
+  $('#set-webgl').checked = localStorage.getItem('termWebgl') === '1';
   $('#set-resume').checked = localStorage.getItem('resumeLast') !== '0';
   $('#set-theme').value = currentTheme();
+  $('#set-agent').value = currentAgent();
   $('#set-lang').value = ['en', 'el'].includes(localStorage.getItem('hubLang')) ? localStorage.getItem('hubLang') : 'auto';
   updateSample();
   $('#set-error').textContent = '';
   const st = await window.hub.claudeGet();
   if (st.error) { claudeState = null; $('#set-error').textContent = st.error; } else { claudeState = st; fillClaude(st); }
+  const ocs = await window.hub.opencodeGet();
+  if (ocs.error) { opencodeState = null; if (!$('#set-error').textContent) $('#set-error').textContent = ocs.error; } else { opencodeState = ocs; fillOpencode(ocs); }
   showSettingsTab('general');
   openDialog(dlgSet, setPathEl);
 }
@@ -1010,8 +1492,8 @@ $('#font-reset').addEventListener('click', () => {
   updateSample();
 });
 
-async function createProjectFlow(name) {
-  const res = await window.hub.createProject(name);
+async function createProjectFlow(name, base) {
+  const res = await window.hub.createProject(name, base);
   if (!res.ok) return { error: res.error };
   await loadProjects();
   const found = projects.find((p) => p.path.toLowerCase() === res.path.toLowerCase())
@@ -1023,11 +1505,26 @@ async function createProjectFlow(name) {
 newNameEl.addEventListener('input', updateWhere);
 dlgNew.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const r = await createProjectFlow(newNameEl.value);
+  const r = await createProjectFlow(newNameEl.value, newBase);
   if (r.error) $('#new-error').textContent = r.error;
-  else closeDialog();
+  else { localStorage.setItem('newDest', newBase); closeDialog(); }
 });
-$('#new-change').addEventListener('click', showSettings);
+dlgRename.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const res = await window.hub.renameProject(renamePath, renameNameEl.value, lang());
+  if (!res.ok) { $('#rename-error').textContent = res.error; return; }
+  closeDialog();
+  const old = sessions.get(keyOf({ path: renamePath }));
+  if (old) closeSession(old);
+  await loadProjects();
+});
+$('#new-change').addEventListener('click', async () => {
+  const picked = await window.hub.chooseFolder(newBase);
+  if (!picked) return;
+  if (!newDests.some((d) => d.path.toLowerCase() === picked.toLowerCase())) newDests.push({ path: picked, label: picked });
+  fillDest(newDests.find((d) => d.path.toLowerCase() === picked.toLowerCase()).path);
+  updateWhere();
+});
 $('#new-project').addEventListener('click', showNewDialog);
 $('#settings-btn').addEventListener('click', showSettings);
 $('#set-browse').addEventListener('click', async () => {
@@ -1036,17 +1533,27 @@ $('#set-browse').addEventListener('click', async () => {
 });
 dlgSet.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const pathCheck = await window.hub.setSettings(setPathEl.value, true);
+  const prevAgent = currentAgent();
+  const roots = collectRoots();
+  const pathCheck = await window.hub.setSettings(setPathEl.value, roots, true);
   if (!pathCheck.ok) { showSettingsTab('general'); $('#set-error').textContent = pathCheck.error; return; }
   if (claudeState) {
     const check = await window.hub.claudeSet({ ...collectClaude(), dryRun: true });
     if (!check.ok) { showSettingsTab('claude'); $('#set-error').textContent = check.error; return; }
   }
-  const res = await window.hub.setSettings(setPathEl.value);
+  if (opencodeState) {
+    const check = await window.hub.opencodeSet({ ...collectOpencode(), dryRun: true });
+    if (!check.ok) { showSettingsTab('opencode'); $('#set-error').textContent = check.error; return; }
+  }
+  const res = await window.hub.setSettings(setPathEl.value, roots);
   if (!res.ok) { showSettingsTab('general'); $('#set-error').textContent = res.error; return; }
   if (claudeState) {
     const saved = await window.hub.claudeSet(collectClaude());
     if (!saved.ok) { showSettingsTab('claude'); $('#set-error').textContent = saved.error; return; }
+  }
+  if (opencodeState) {
+    const saved = await window.hub.opencodeSet(collectOpencode());
+    if (!saved.ok) { showSettingsTab('opencode'); $('#set-error').textContent = saved.error; return; }
   }
   const size = Math.min(32, Math.max(8, Math.round(Number(setSizeEl.value)) || DEFAULT_SIZE));
   localStorage.setItem('termFont', setFontEl.value.trim() || DEFAULT_FONT);
@@ -1054,12 +1561,16 @@ dlgSet.addEventListener('submit', async (e) => {
   localStorage.setItem('termWebgl', $('#set-webgl').checked ? '1' : '0');
   localStorage.setItem('resumeLast', $('#set-resume').checked ? '1' : '0');
   localStorage.setItem('hubTheme', $('#set-theme').value === 'light' ? 'light' : 'dark');
+  const nextAgent = $('#set-agent').value === 'opencode' ? 'opencode' : 'claude';
+  localStorage.setItem('hubAgent', nextAgent);
   const langSel = $('#set-lang').value;
   if (langSel === 'en' || langSel === 'el') localStorage.setItem('hubLang', langSel); else localStorage.removeItem('hubLang');
   applyTheme();
+  applyAuthVisibility();
   applyTermFont();
   applyWebgl();
   closeDialog();
+  if (prevAgent !== nextAgent) restartSessionsForAgent().catch(() => {});
   loadProjects();
 });
 

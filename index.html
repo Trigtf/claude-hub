@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data:; script-src 'self'">
-  <title>Claude Hub</title>
+  <title>Agent Hub</title>
   <link rel="stylesheet" href="node_modules/@xterm/xterm/css/xterm.css">
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -13,7 +13,7 @@
       <div class="side-head">
         <span>Projects</span>
         <span class="head-btns">
-          <button id="auth" title="Runs: gcloud auth application-default login">Auth</button>
+          <button id="auth" title="gcloud login">Auth</button>
           <button id="settings-btn" title="Settings">&#x2699;</button>
           <button id="refresh" title="Refresh list">&#x21bb;</button>
         </span>
@@ -33,6 +33,7 @@
     <aside id="rightbar">
       <section id="drop" tabindex="0">
         <div class="drop-head">
+          <button type="button" class="collapse" data-target="drop" title="Collapse / expand"></button>
           <span class="ttl"><span>Files for the project</span><span id="drop-proj" class="proj-tag"></span></span>
           <label class="auto" title="Automatically sends the path to the active terminal"><input type="checkbox" id="auto" checked> automatic</label>
         </div>
@@ -45,7 +46,8 @@
       </section>
       <section id="outputs">
         <div class="drop-head">
-          <span class="ttl"><span>Files from Claude <span id="out-count"></span></span><span id="out-proj" class="proj-tag"></span></span>
+          <button type="button" class="collapse" data-target="outputs" title="Collapse / expand"></button>
+          <span class="ttl"><span>Files from agent <span id="out-count"></span></span><span id="out-proj" class="proj-tag"></span></span>
           <span class="out-tools">
             <label class="auto" title="Hides code and config files (js, py, css, json...)"><input type="checkbox" id="only-deliv" checked> deliverables only</label>
             <button id="out-clear" title="Clear list">&times;</button>
@@ -60,23 +62,36 @@
       <h3>New project</h3>
       <label for="new-name">Name</label>
       <input id="new-name" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. my-new-app">
-      <div class="where">Will be created in: <code id="new-where"></code> <button type="button" id="new-change" class="link">change</button></div>
+      <label for="new-dest">Location</label>
+      <div class="row"><select id="new-dest" style="flex:1;min-width:0"></select><button type="button" id="new-change">Browse...</button></div>
+      <div class="where">Will be created in: <code id="new-where"></code></div>
       <div class="error" id="new-error"></div>
       <div class="buttons"><button type="button" class="cancel">Cancel</button><button type="submit" class="primary">Create</button></div>
+    </form>
+    <form id="dlg-rename" class="dialog" hidden>
+      <h3>Rename project</h3>
+      <label for="rename-name">New name</label>
+      <input id="rename-name" type="text" autocomplete="off" spellcheck="false">
+      <div class="error" id="rename-error"></div>
+      <div class="buttons"><button type="button" class="cancel">Cancel</button><button type="submit" class="primary">Rename</button></div>
     </form>
     <form id="dlg-settings" class="dialog wide" hidden>
       <h3>Settings</h3>
       <div class="stabs">
         <button type="button" class="stab active" data-tab="general">General</button>
         <button type="button" class="stab" data-tab="claude">Claude</button>
+        <button type="button" class="stab" data-tab="opencode">OpenCode</button>
         <button type="button" class="stab" data-tab="env">Environment</button>
-        <button type="button" class="stab" data-tab="mcp">MCP</button>
       </div>
 
       <div class="spane" data-pane="general">
         <label for="set-path">Folder for new projects</label>
         <div class="row"><input id="set-path" type="text" autocomplete="off" spellcheck="false"><button type="button" id="set-browse">Browse...</button></div>
         <div class="hint">Projects you create here are made in this folder and also show up in /project.</div>
+        <label>Additional scan folders</label>
+        <div id="set-roots" class="envtable"></div>
+        <button type="button" id="set-root-add" class="addroot">+ Add folder</button>
+        <div class="hint">Extra folders whose subfolders appear as projects in the list.</div>
         <label for="set-font">Terminal font (name of an installed font)</label>
         <input id="set-font" type="text" list="font-list" autocomplete="off" spellcheck="false" placeholder="e.g. Cascadia Mono">
         <datalist id="font-list">
@@ -107,9 +122,15 @@
         </select>
         <div class="hint">Restart the app to apply</div>
         <label class="check"><input type="checkbox" id="set-webgl"> Fast terminal rendering (WebGL)</label>
-        <div class="hint">Uses the graphics card to draw terminal text. If you see visual glitches, turn it off.</div>
+        <div class="hint">Off by default: on some GPUs it can leave stray characters. Enable for faster drawing if you don't see glitches.</div>
         <label class="check"><input type="checkbox" id="set-resume"> Open with the project's last conversation</label>
         <div class="hint">When you open a project that has a previous conversation, it continues automatically (--continue). If you turn this off, a new conversation always starts.</div>
+        <label for="set-agent">Agent</label>
+        <select id="set-agent">
+          <option value="claude">Claude Code</option>
+          <option value="opencode">opencode</option>
+        </select>
+        <div class="hint">Which command runs in each project's terminal. Open terminals restart with the new agent when you save.</div>
       </div>
 
       <div class="spane" data-pane="claude" hidden>
@@ -137,6 +158,28 @@
         <div class="row"><label for="cl-channel" class="inline">Channel</label><select id="cl-channel"><option value="latest">latest</option><option value="stable">stable</option></select></div>
       </div>
 
+      <div class="spane" data-pane="opencode" hidden>
+        <div class="hint"><span>Edits</span> <code id="oc-path"></code><span>.</span> <span>Applies to new opencode sessions (tabs that are already open are not affected).</span></div>
+        <label for="oc-model">Model</label>
+        <input id="oc-model" type="text" list="oc-model-list" autocomplete="off" spellcheck="false" placeholder="empty = opencode default">
+        <datalist id="oc-model-list">
+          <option value="deepseek/deepseek-flash"></option>
+          <option value="deepseek/deepseek-v4-flash"></option>
+          <option value="deepseek/deepseek-v4-pro"></option>
+          <option value="deepseek/deepseek-v4-flash-vision-exp"></option>
+        </datalist>
+        <div class="hint" id="oc-model-note"></div>
+        <label for="oc-deepseek-key">DeepSeek API key</label>
+        <div class="row">
+          <input id="oc-deepseek-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...">
+          <button type="button" id="oc-deepseek-clear">Clear</button>
+        </div>
+        <div class="hint" id="oc-deepseek-note"></div>
+        <label for="oc-mode">Permission mode</label>
+        <select id="oc-mode"></select>
+        <div class="hint">OpenCode applies permissions per tool. Presets replace existing rules; "custom" keeps them.</div>
+      </div>
+
       <div class="spane" data-pane="env" hidden>
         <div class="hint">The model (ANTHROPIC_MODEL) and DISABLE_AUTOUPDATER are set from the Claude tab.</div>
         <label>Claude env (settings.json → env)</label>
@@ -147,26 +190,6 @@
         <button type="button" class="addrow" data-target="env-gcloud">+ Add variable</button>
       </div>
 
-      <div class="spane" data-pane="mcp" hidden>
-        <div class="hint">Shows MCP servers for user, local and the active project. Additions and removals apply immediately (via <code>claude mcp</code><span>).</span></div>
-        <div id="mcp-list" class="mcplist"></div>
-        <div class="row">
-          <button type="button" id="mcp-check">Check connection</button>
-          <button type="button" id="mcp-add-toggle">+ Add server</button>
-        </div>
-        <pre id="mcp-check-out" hidden></pre>
-        <div id="mcp-add" class="mcpadd" hidden>
-          <div class="row">
-            <input id="mcp-name" type="text" placeholder="name" autocomplete="off" spellcheck="false">
-            <select id="mcp-transport"><option value="stdio">stdio (command)</option><option value="http">http</option><option value="sse">sse</option></select>
-            <select id="mcp-scope"><option value="user">user (all projects)</option><option value="local">local (active project)</option><option value="project">project (.mcp.json)</option></select>
-          </div>
-          <input id="mcp-target" type="text" placeholder="e.g. npx -y @modelcontextprotocol/server-filesystem C:/folder  or  https://example.com/mcp" autocomplete="off" spellcheck="false">
-          <input id="mcp-env" type="text" placeholder="env for stdio, separated by spaces: KEY=value KEY2=value2 (optional)" autocomplete="off" spellcheck="false">
-          <div class="buttons"><button type="button" id="mcp-add-cancel">Cancel</button><button type="button" id="mcp-add-go" class="primary">Add</button></div>
-        </div>
-      </div>
-
       <div class="error" id="set-error"></div>
       <div class="buttons"><button type="button" class="cancel">Cancel</button><button type="submit" class="primary">Save</button></div>
     </form>
@@ -175,6 +198,7 @@
   <script src="node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
   <script src="node_modules/@xterm/addon-webgl/lib/addon-webgl.js"></script>
+  <script src="node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
   <script src="i18n.js"></script>
   <script src="renderer.js"></script>
 </body>
