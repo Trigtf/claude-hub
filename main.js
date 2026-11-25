@@ -719,14 +719,7 @@ function spawnPty(id, kind, cwd, resume, cols, rows, lang, agent = 'claude') {
     cols: cols || 100,
     rows: rows || 30,
     cwd,
-    env: {
-      // Classic renderer: Claude Code writes into the terminal's native scrollback, so the xterm scrollbar works.
-      ...(agent === 'claude' && kind !== 'auth' ? { CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: '1' } : {}),
-      ...process.env,
-      ...(kind === 'auth' ? readHubSettings().gcloudEnv : {}),
-      COLORTERM: 'truecolor',
-      TERM: 'xterm-256color',
-    },
+    env: { ...process.env, ...(kind === 'auth' ? readHubSettings().gcloudEnv : {}), COLORTERM: 'truecolor', TERM: 'xterm-256color' },
   });
   ptys.set(id, p);
   ptyCwd.set(id, cwd);
