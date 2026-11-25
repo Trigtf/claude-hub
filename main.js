@@ -5,6 +5,12 @@ const os = require('os');
 const path = require('path');
 const pty = require('@lydell/node-pty');
 
+// Force classic (space-taking) scrollbars instead of Chromium/Windows overlay scrollbars,
+// otherwise the terminal scrollbar is hidden until hover and ignores our CSS.
+if (app.commandLine && typeof app.commandLine.appendSwitch === 'function') {
+  app.commandLine.appendSwitch('disable-features', 'OverlayScrollbar,OverlayScrollbars,FluentOverlayScrollbars,FluentOverlayScrollbar');
+}
+
 const HOME = os.homedir();
 const INBOX = path.join(HOME, '.claude', 'hub-inbox');
 const CONFIG_FILE = process.env.HUB_CONFIG || path.join(HOME, '.claude', 'project-launcher', 'config.json');
@@ -160,6 +166,7 @@ function createWindow() {
     minHeight: 500,
     backgroundColor: '#14161a',
     title: 'Agent Hub',
+    icon: path.join(__dirname, 'assets', 'icon.png'),
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -1331,12 +1338,14 @@ ipcMain.handle('settings:get', () => {
     newProjectsPath: cfg.new_projects_path || defaultNewPath(),
     isDefault: !cfg.new_projects_path,
     scanRoots: (Array.isArray(cfg.scan_roots) ? cfg.scan_roots : []).filter((p) => typeof p === 'string'),
+    agent: cfg.agent === 'opencode' || cfg.agent === 'claude' ? cfg.agent : null,
   };
 });
 
-ipcMain.handle('settings:set', (_e, newPath, scanRoots, dryRun) => {
+ipcMain.handle('settings:set', (_e, newPath, scanRoots, dryRun, agent) => {
   const p = String(newPath || '').trim();
   if (!p || !path.isAbsolute(p)) return { ok: false, error: 'Enter a full path, e.g. C:/Users/.../Projects' };
+  if (agent !== undefined && agent !== 'claude' && agent !== 'opencode') return { ok: false, error: 'Invalid agent.' };
   const roots = [];
   for (const raw of Array.isArray(scanRoots) ? scanRoots : []) {
     const r = String(raw || '').trim();
@@ -1350,7 +1359,17 @@ ipcMain.handle('settings:set', (_e, newPath, scanRoots, dryRun) => {
   const cfg = r.cfg;
   cfg.new_projects_path = path.normalize(p);
   if (roots.length) cfg.scan_roots = roots; else delete cfg.scan_roots;
+  if (agent) cfg.agent = agent;
   try { writeConfig(cfg); } catch (err) { return { ok: false, error: err.message }; }
+  return { ok: true };
+});
+
+ipcMain.handle('settings:agent', (_e, agent) => {
+  if (agent !== 'claude' && agent !== 'opencode') return { ok: false, error: 'Invalid agent.' };
+  const r = readConfigStrict();
+  if (!r.ok) return { ok: false, error: r.error };
+  r.cfg.agent = agent;
+  try { writeConfig(r.cfg); } catch (err) { return { ok: false, error: err.message }; }
   return { ok: true };
 });
 
@@ -1410,6 +1429,7 @@ if (process.argv.includes('--selftest')) {
 }
 
 app.whenReady().then(() => {
+  app.setAppUserModelId('io.github.trigtf.agenthub');
   dragIcon = nativeImage.createFromBitmap(Buffer.alloc(32 * 32 * 4, 180), { width: 32, height: 32 });
   createWindow();
 });

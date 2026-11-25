@@ -36,6 +36,7 @@
       "index.html",
       "styles.css",
       "package.json",
+      "assets/**/*",
       "node_modules/@xterm/**/*",
       "node_modules/@lydell/**/*"
     ],
@@ -51,6 +52,7 @@
           ]
         }
       ],
+      "icon": "assets/icon.ico",
       "signAndEditExecutable": false
     },
     "portable": {

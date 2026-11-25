@@ -15,6 +15,8 @@ const EL = {
   'Open the folder with pasted items': 'Άνοιγμα φακέλου με τα επικολλημένα',
   'Folder': 'Φάκελος',
   'Files from agent': 'Αρχεία από το agent',
+  '↓ Latest': '↓ Πρόσφατα',
+  'Scroll to latest': 'Μετάβαση στα πρόσφατα',
   'OpenCode': 'OpenCode',
   'Applies to new opencode sessions (tabs that are already open are not affected).': 'Ισχύει για νέες συνεδρίες opencode (τα ήδη ανοιχτά tabs δεν επηρεάζονται).',
   'empty = opencode default': 'κενό = προεπιλογή του opencode',

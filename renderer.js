@@ -8,6 +8,7 @@ const dropEl = $('#drop');
 const hintEl = $('#drop-hint');
 const chipsEl = $('#chips');
 const autoEl = $('#auto');
+const scrollLatestBtn = $('#scroll-latest');
 
 let projects = [];
 const sessions = new Map();
@@ -346,6 +347,22 @@ function fitActive() {
   if (s) { try { s.fit.fit(); } catch { /* not visible yet */ } }
 }
 
+// Show a "jump to latest" button only while the active terminal is scrolled up.
+function updateScrollLatest() {
+  const s = sessions.get(activeKey);
+  if (!s) { scrollLatestBtn.hidden = true; return; }
+  const b = s.term.buffer.active;
+  scrollLatestBtn.hidden = b.viewportY >= b.baseY;
+}
+
+scrollLatestBtn.addEventListener('click', () => {
+  const s = sessions.get(activeKey);
+  if (!s) return;
+  s.term.scrollToBottom();
+  s.term.focus();
+  updateScrollLatest();
+});
+
 function activate(key) {
   activeKey = key;
   for (const s of sessions.values()) s.el.classList.toggle('active', s.key === key);
@@ -359,8 +376,9 @@ function activate(key) {
   renderOutputs();
   updatePanelTitles();
   persistTabs();
+  updateScrollLatest();
   if (s) {
-    requestAnimationFrame(() => { fitActive(); s.term.refresh(0, s.term.rows - 1); s.term.focus(); });
+    requestAnimationFrame(() => { fitActive(); s.term.refresh(0, s.term.rows - 1); s.term.focus(); updateScrollLatest(); });
   }
 }
 
@@ -602,6 +620,7 @@ function createSession(project) {
     window.hub.write(id, d);
   });
   term.onResize(({ cols, rows }) => { if (s.alive) window.hub.resize(id, cols, rows); });
+  term.onScroll(() => { if (s.key === activeKey) updateScrollLatest(); });
 
   term.attachCustomKeyEventHandler((ev) => {
     if (ev.type === 'keydown' && (ev.key === 'Backspace' || ev.key === 'Delete')) {
@@ -651,10 +670,9 @@ function createSession(project) {
       readClipboardData().then((r) => {
         if (r.type === 'image') {
           const item = { path: r.path, isImage: true };
-          const before = captureInputLine(s);
           addItems([item], false, s.key);
           insertPaths([r.path], s);
-          trackTerminalPaste(s, item, before);
+          trackTerminalPaste(s, item);
         } else if (r.type === 'text') term.paste(r.text);
       });
       return false;
@@ -672,11 +690,10 @@ function createSession(project) {
     if (!dt || dt.getData('text/plain') || !dt.files.length) return;
     e.preventDefault();
     e.stopPropagation();
-    const before = captureInputLine(s);
     filesFromTransfer(dt).then((items) => {
       addItems(items, false, s.key);
       insertPaths(items.map((i) => i.path), s);
-      for (const it of items) trackTerminalPaste(s, it, before);
+      for (const it of items) trackTerminalPaste(s, it);
     });
   }, true);
 
@@ -693,10 +710,9 @@ function createSession(project) {
     const r = await readClipboardData();
     if (r.type === 'image') {
       const item = { path: r.path, isImage: true };
-      const before = captureInputLine(s);
       addItems([item], false, s.key);
       insertPaths([r.path], s);
-      trackTerminalPaste(s, item, before);
+      trackTerminalPaste(s, item);
     } else if (r.type === 'text') term.paste(r.text);
   });
 
@@ -804,6 +820,7 @@ window.hub.onData((id, data) => {
   const s = byId.get(id);
   if (!s) return;
   s.term.write(data, () => {
+    if (s.key === activeKey) updateScrollLatest();
     if (s.pendingPastes && s.pendingPastes.length && s.reconcileArmedUntil > Date.now()) {
       clearTimeout(s.reconcileTimer);
       s.reconcileTimer = setTimeout(() => reconcileTerminalPastes(s), 60);
@@ -897,58 +914,29 @@ function addItems(items, insert, key = activeKey) {
   if (insert && autoEl.checked) insertPaths(items.map((i) => i.path));
 }
 
-function captureInputLine(s) {
-  const b = s.term.buffer.active;
-  const line = b.getLine(b.baseY + b.cursorY);
-  return line ? line.translateToString(true) : '';
+function inputIsEmpty(s) {
+  const blk = findInputBlock(s.term);
+  if (!blk) return false;
+  return blk.rows.every((r) => rowText(r, r.a, r.b).trim() === '');
 }
 
-// The characters that appeared on the input line because of the paste. Agents like opencode
-// render a pasted file as e.g. "[image 1]", so we can't assume the raw path stays visible.
-function insertedBetween(before, after) {
-  let start = 0;
-  while (start < before.length && start < after.length && before[start] === after[start]) start++;
-  let endB = before.length;
-  let endA = after.length;
-  while (endB > start && endA > start && before[endB - 1] === after[endA - 1]) { endB--; endA--; }
-  return after.slice(start, endA);
-}
-
-function trackTerminalPaste(s, item, before) {
+function trackTerminalPaste(s, item) {
   if (!s.pendingPastes) return;
-  const entry = { item, needle: '', createdAt: Date.now(), expires: Date.now() + 60000 };
-  s.pendingPastes.push(entry);
-  const capture = () => {
-    if (!s.pendingPastes.includes(entry)) return;
-    const token = insertedBetween(before, captureInputLine(s)).trim();
-    if (token) entry.needle = token;
-  };
-  for (const ms of [250, 600, 1200]) setTimeout(capture, ms);
+  s.pendingPastes.push({ item, createdAt: Date.now(), expires: Date.now() + 30000 });
 }
 
-// When a pasted attachment (e.g. "[image 1]") is deleted from the input with Backspace/Delete,
-// drop the matching chip from the right panel instead of leaving it behind.
+// Drop the chip only when the whole command line was emptied with Backspace/Delete
+// (i.e. the pasted attachment was really removed), never on unrelated edits.
 function reconcileTerminalPastes(s) {
   const pending = s.pendingPastes;
   if (!pending || !pending.length) return;
-  const b = s.term.buffer.active;
-  const y = b.baseY + b.cursorY;
-  let text = '';
-  for (let i = Math.max(0, y - 2); i <= Math.min(b.length - 1, y + 1); i++) {
-    const line = b.getLine(i);
-    if (line) text += line.translateToString(true);
-  }
   const now = Date.now();
-  const gone = [];
-  s.pendingPastes = pending.filter((e) => {
-    if (now > e.expires) return false;
-    if (!e.needle || now - e.createdAt < 1500) return true;
-    if (text.includes(e.needle)) return true;
-    gone.push(e.item);
-    return false;
-  });
-  if (!gone.length) return;
-  inboxByKey.set(s.key, (inboxByKey.get(s.key) || []).filter((i) => !gone.includes(i)));
+  s.pendingPastes = pending.filter((e) => now <= e.expires);
+  const ready = s.pendingPastes.filter((e) => now - e.createdAt >= 1500);
+  if (!ready.length || !inputIsEmpty(s)) return;
+  const items = new Set(ready.map((e) => e.item));
+  inboxByKey.set(s.key, (inboxByKey.get(s.key) || []).filter((i) => !items.has(i)));
+  s.pendingPastes = [];
   if (s.key === activeKey) renderChips();
 }
 
@@ -1472,7 +1460,7 @@ async function showSettings() {
   $('#set-webgl').checked = localStorage.getItem('termWebgl') === '1';
   $('#set-resume').checked = localStorage.getItem('resumeLast') !== '0';
   $('#set-theme').value = currentTheme();
-  $('#set-agent').value = currentAgent();
+  $('#set-agent').value = base.agent || currentAgent();
   $('#set-lang').value = ['en', 'el'].includes(localStorage.getItem('hubLang')) ? localStorage.getItem('hubLang') : 'auto';
   updateSample();
   $('#set-error').textContent = '';
@@ -1534,8 +1522,9 @@ $('#set-browse').addEventListener('click', async () => {
 dlgSet.addEventListener('submit', async (e) => {
   e.preventDefault();
   const prevAgent = currentAgent();
+  const nextAgent = $('#set-agent').value === 'opencode' ? 'opencode' : 'claude';
   const roots = collectRoots();
-  const pathCheck = await window.hub.setSettings(setPathEl.value, roots, true);
+  const pathCheck = await window.hub.setSettings(setPathEl.value, roots, true, nextAgent);
   if (!pathCheck.ok) { showSettingsTab('general'); $('#set-error').textContent = pathCheck.error; return; }
   if (claudeState) {
     const check = await window.hub.claudeSet({ ...collectClaude(), dryRun: true });
@@ -1545,7 +1534,7 @@ dlgSet.addEventListener('submit', async (e) => {
     const check = await window.hub.opencodeSet({ ...collectOpencode(), dryRun: true });
     if (!check.ok) { showSettingsTab('opencode'); $('#set-error').textContent = check.error; return; }
   }
-  const res = await window.hub.setSettings(setPathEl.value, roots);
+  const res = await window.hub.setSettings(setPathEl.value, roots, false, nextAgent);
   if (!res.ok) { showSettingsTab('general'); $('#set-error').textContent = res.error; return; }
   if (claudeState) {
     const saved = await window.hub.claudeSet(collectClaude());
@@ -1561,7 +1550,6 @@ dlgSet.addEventListener('submit', async (e) => {
   localStorage.setItem('termWebgl', $('#set-webgl').checked ? '1' : '0');
   localStorage.setItem('resumeLast', $('#set-resume').checked ? '1' : '0');
   localStorage.setItem('hubTheme', $('#set-theme').value === 'light' ? 'light' : 'dark');
-  const nextAgent = $('#set-agent').value === 'opencode' ? 'opencode' : 'claude';
   localStorage.setItem('hubAgent', nextAgent);
   const langSel = $('#set-lang').value;
   if (langSel === 'en' || langSel === 'el') localStorage.setItem('hubLang', langSel); else localStorage.removeItem('hubLang');
@@ -1574,4 +1562,19 @@ dlgSet.addEventListener('submit', async (e) => {
   loadProjects();
 });
 
-loadProjects().then(restoreTabs);
+// Prefer the agent persisted in config.json (survives localStorage loss / hard kills).
+(async () => {
+  try {
+    const base = await window.hub.getSettings();
+    if (base && (base.agent === 'opencode' || base.agent === 'claude')) {
+      localStorage.setItem('hubAgent', base.agent);
+    } else {
+      // First launch after the upgrade: back up the current choice to config.json so it is durable.
+      const local = currentAgent();
+      localStorage.setItem('hubAgent', local);
+      window.hub.setAgent(local).catch(() => {});
+    }
+  } catch { /* fall back to localStorage */ }
+  await loadProjects();
+  await restoreTabs();
+})();
