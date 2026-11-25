@@ -240,9 +240,11 @@ function renderTabs() {
 }
 
 const TERM_THEMES = {
-  dark: { background: '#14161a', foreground: '#d7dae0', cursor: '#d97757', selectionBackground: '#3a4352' },
+  dark: { background: '#14161a', foreground: '#d7dae0', cursor: '#d97757', selectionBackground: '#3a4352',
+    scrollbarSliderBackground: 'rgba(160, 168, 182, 0.35)', scrollbarSliderHoverBackground: 'rgba(160, 168, 182, 0.55)', scrollbarSliderActiveBackground: 'rgba(217, 119, 87, 0.8)' },
   light: {
     background: '#f6f7f9', foreground: '#1f2430', cursor: '#c4562f', selectionBackground: '#bcd2f0', cursorAccent: '#f6f7f9',
+    scrollbarSliderBackground: 'rgba(31, 36, 48, 0.3)', scrollbarSliderHoverBackground: 'rgba(31, 36, 48, 0.5)', scrollbarSliderActiveBackground: 'rgba(196, 86, 47, 0.8)',
     black: '#1f2430', red: '#c0362c', green: '#1a7f3c', yellow: '#8a6a00', blue: '#1f5fbf', magenta: '#8a3fa0', cyan: '#0f7c88', white: '#5f6775',
     brightBlack: '#5f6775', brightRed: '#d9473b', brightGreen: '#23994a', brightYellow: '#a07c00', brightBlue: '#2f73d9', brightMagenta: '#a352bb', brightCyan: '#1a95a3', brightWhite: '#1f2430',
   },
